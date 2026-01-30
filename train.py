@@ -190,7 +190,7 @@ def run_sparse_model(trials_data, trials_labels, noise_floors, noise_idx, C=10) 
     return acc_arr, weights_arr
 
     # %%
-def run_adaptive_model(trials_data, trials_labels, enabled_settings=[0, 1, 2, 3], train_setting=None, train_noise=0, selection=0, C=10, sim_weights=None):
+def run_adaptive_model(trials_data, trials_labels, enabled_settings=[0, 1, 2, 3], train_setting=None, train_noise=0, selection=0, C=10, sim_weights=None, sim_settings=None, mode='linear'):
     enabled_settings = np.array(enabled_settings)
     if train_setting is None:
         train_setting = min(enabled_settings)
@@ -207,42 +207,52 @@ def run_adaptive_model(trials_data, trials_labels, enabled_settings=[0, 1, 2, 3]
         x_train = x_train + np.random.normal(0, train_noise, x_train.shape)
         scaler, model = build_log_reg_model(x_train, y_train, C=C)
         
+
         if sim_weights is not None:
             curr_weights = sim_weights[i]
         else:
+            num_settings = len(enabled_settings)
             curr_weights = get_log_reg_weights(model, x_train, y_train)
+            print(curr_weights)
+            if mode == 'exponential':
+                curr_weights = np.exp(curr_weights) / np.sum(np.exp(curr_weights)) # Implement a softmax distribution
+            elif mode == 'quadratic':
+                curr_weights = curr_weights**2
+            bin_size = (max(curr_weights)-min(curr_weights))/num_settings
+            weights = (curr_weights-min(curr_weights))/bin_size
+            thresholds = np.linspace(-0.5, num_settings+0.5, num_settings+2)
             
-        # Calculatons of setting thresholds
-        num_settings = len(enabled_settings)
-        # thresholds = np.array([-0.5]+list(
-        #         np.arange(0.5, num_settings, 1))+[num_settings+0.5])
-        thresholds = np.linspace(-0.5, num_settings+0.5, num_settings+2)
-        # fig, ax = plt.subplots(2) # sharex=True)
-        # ax[0].plot(curr_weights)
-        bin_size = (max(curr_weights)-min(curr_weights))/num_settings
-        weights = (curr_weights-min(curr_weights))/bin_size
-        # ax[0].plot(weights)
-        
-        # For now, just set the lowest weights to 0, don't remap the settings.
-        settings = np.zeros(weights.shape).astype(int)
-        for idx in range(num_settings+1):
-            arg = (weights<=thresholds[idx+1])&(weights>=thresholds[idx])
-            settings = np.where(arg, idx, settings)
-        # Settings goes from 0 to n where n represents "best" setting
-        # and 0 represents worst setting
-        # In the real array, noise index 0 corresponds to best, and n to worst. 
-        # ax[1].plot(settings)
+        if sim_settings is not None:
+            settings = sim_settings[i]
+        else:
+            # Calculatons of setting thresholds
+            
+            # thresholds = np.array([-0.5]+list(
+            #         np.arange(0.5, num_settings, 1))+[num_settings+0.5])
+            # fig, ax = plt.subplots(2) # sharex=True)
+            # ax[0].plot(curr_weights)
+            # ax[0].plot(weights)
+            
+            # For now, just set the lowest weights to 0, don't remap the settings.
+            settings = np.zeros(weights.shape).astype(int)
+            for idx in range(num_settings+1):
+                arg = (weights<=thresholds[idx+1])&(weights>=thresholds[idx])
+                settings = np.where(arg, idx, settings)
+            # Settings goes from 0 to n where n represents "best" setting
+            # and 0 represents worst setting
+            # In the real array, noise index 0 corresponds to best, and n to worst. 
+            # ax[1].plot(settings)
 
-        settings = (num_settings - 1) - settings
-        settings = enabled_settings[settings]
-        # plt.hist(settings, bins=range(0, num_settings+1), alpha=0.5)
+            settings = (num_settings - 1) - settings
+            settings = enabled_settings[settings]
+            # plt.hist(settings, bins=range(0, num_settings+1), alpha=0.5)
+
 
         # do the selection
         # for now, just set the lowest weights to 0, don't remap the settings.
         sorted_weight_idcs = np.argsort(weights)
         dropped_idcs = sorted_weight_idcs[:selection]
-
-        
+            
         # ax[0].plot((3-settings)/3*max(curr_weights))
         settings_p = settings.copy()
         # settings_p[np.argwhere(settings == 2)] = 2
@@ -282,12 +292,12 @@ if __name__ == "__main__":
     base_acc_arr, base_weights_arr = run_enob_sweep(trial_lst, label_lst, [0, 1, 2, 3], C=10)
 
     # %%
-    sparse_accs = []
-    sparse_weights = []
-    for i in range(4):
-        sparse_acc_arr, sparse_weights_arr = run_sparse_model(trial_lst, label_lst, [3, 2, 1, 0], i)
-        sparse_accs.append(sparse_acc_arr)
-        sparse_weights.append(sparse_weights_arr)
+    # sparse_accs = []
+    # sparse_weights = []
+    # for i in range(4):
+    #     sparse_acc_arr, sparse_weights_arr = run_sparse_model(trial_lst, label_lst, [3, 2, 1, 0], i)
+    #     sparse_accs.append(sparse_acc_arr)
+    #     sparse_weights.append(sparse_weights_arr)
 
 
     # %%
