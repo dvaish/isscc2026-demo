@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
 """
 Neural Recording Chip - Resolution Control Demo
-Demonstrates how channel resolution settings affect classifier performance.
-Optimized for performance with efficient matplotlib updates.
+Clean, responsive PyQt5 + pyqtgraph implementation.
 """
 
+import sys
 import numpy as np
-import tkinter as tk
-from tkinter import ttk
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.figure import Figure
-import matplotlib.pyplot as plt
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QGridLayout, QLabel, QSlider, QScrollArea, QPushButton, QFrame,
+    QSplitter, QGroupBox, QSpinBox
+)
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QFont, QPalette, QColor
+import pyqtgraph as pg
 
 from train import settings_to_pow, build_dataset, run_adaptive_model
 
+# Configure pyqtgraph for clean look
+pg.setConfigOptions(antialias=True, background='w', foreground='k')
+
 
 class DummyDataGenerator:
-    """Generate synthetic neural recording data for demonstration."""
+    """Generate synthetic neural recording data."""
     
     def __init__(self, trial_lst, label_lst, num_channels=64, sampling_rate=30000):
         self.trial_lst = trial_lst
@@ -25,372 +31,398 @@ class DummyDataGenerator:
         self.sampling_rate = sampling_rate
         self.time_step = 0
         
-        # Generate channel importances (between 0 and 1)
-        np.random.seed(42)  # For reproducibility
-        self.channel_importances = np.random.beta(2, 5, num_channels)
+        self.channel_importances = np.load("sparse_weights.npy")
+        self.channel_importances = np.mean(self.channel_importances, axis=(0, 1))
         
-        # Power-accuracy tradeoff curve (simulated)
-        self.power_levels = settings_to_pow[0] * (1+np.arange(self.num_channels))[::-1]  # uW
-        self.accuracy = np.load("sparse.npy") # 4 x 5 x 64
-        self.accuracy = np.mean(self.accuracy, axis=(0, 1)) # 64
+        self.power_levels = settings_to_pow[0] * (1 + np.arange(self.num_channels))[::-1]
+        self.accuracy = np.load("sparse_accuracies.npy")
+        self.accuracy = np.mean(self.accuracy, axis=(0, 1))
         
     def get_voltage_data(self, duration_sec=1):
-        """Generate 1 second of voltage data for all 64 channels at 1kHz (downsampled)."""
-        # Generate at 1kHz for display (not full 30kHz)
-        num_samples = int(duration_sec * 1000)  # 1kHz rate
-        
-        # Generate realistic neural-like data
+        """Generate 1s of voltage data at 1kHz."""
+        num_samples = int(duration_sec * 1000)
         data = np.zeros((self.num_channels, num_samples))
-        
-        t = np.arange(num_samples) / 1000.0  # Time in seconds
+        t = np.arange(num_samples) / 1000.0
         
         for ch in range(self.num_channels):
-            # Add some frequency content (like neural oscillations)
-            freq1 = 10 + ch * 2  # Different frequency per channel
-            freq2 = 50 + ch * 3
-            
-            signal = (self.channel_importances[ch] * 
-                     (50 * np.sin(2 * np.pi * freq1 * t) + 
-                      30 * np.sin(2 * np.pi * freq2 * t)))
-            
-            noise = np.random.normal(0, 10, num_samples)
-            data[ch] = signal + noise
+            freq1, freq2 = 10 + ch * 2, 50 + ch * 3
+            signal = self.channel_importances[ch] * (
+                50 * np.sin(2 * np.pi * freq1 * t) + 
+                30 * np.sin(2 * np.pi * freq2 * t)
+            )
+            data[ch] = signal + np.random.normal(0, 10, num_samples)
         
         self.time_step += 1
         return data
     
     def get_channel_importances(self):
-        """Get the importance score for each channel."""
         return self.channel_importances
     
     def get_power_accuracy_curve(self):
-        """Get power consumption vs classifier accuracy."""
         return self.power_levels, self.accuracy
     
     def get_reconfiguration_point(self, settings=None):
-        """Get a simulated reconfiguration point (not used in demo)."""
-        acc_arr, weights_arr, settings_arr = run_adaptive_model(self.trial_lst, self.label_lst, enabled_settings=[0, 1, 2, 3], sim_weights=settings)
+        acc_arr, weights_arr, settings_arr = run_adaptive_model(
+            self.trial_lst, self.label_lst, 
+            enabled_settings=[0, 1, 2, 3], sim_weights=settings
+        )
         powers = settings_to_pow[settings_arr]
-        acc_arr = np.array(acc_arr)
-        powers = np.array(powers)
-        return acc_arr, np.sum(powers, axis=-1)
+        return np.array(acc_arr), np.sum(np.array(powers), axis=-1)
 
 
-class Demo:
-    def __init__(self, root, trial_lst, label_lst):
-        self.root = root
-        self.root.title('Neural Recording Chip - Resolution Control Demo')
-        self.root.geometry('1600x1000')
+class ChannelSlider(QWidget):
+    """Compact channel resolution slider."""
+    
+    def __init__(self, channel_id, callback):
+        super().__init__()
+        self.channel_id = channel_id
+        self.callback = callback
         
-        # Data generator
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(2, 1, 2, 1)
+        layout.setSpacing(4)
+        
+        # Channel label
+        self.label = QLabel(f"{channel_id:02d}")
+        self.label.setFixedWidth(22)
+        self.label.setFont(QFont("Menlo", 9))
+        self.label.setStyleSheet("color: #555;")
+        layout.addWidget(self.label)
+        
+        # Slider
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(1, 4)
+        self.slider.setValue(2)
+        self.slider.setFixedWidth(60)
+        self.slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 4px;
+                background: #ddd;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                width: 12px;
+                height: 12px;
+                margin: -4px 0;
+                background: #2196F3;
+                border-radius: 6px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #1976D2;
+            }
+        """)
+        self.slider.valueChanged.connect(self._on_change)
+        layout.addWidget(self.slider)
+        
+        # Value display
+        self.value_label = QLabel("2")
+        self.value_label.setFixedWidth(12)
+        self.value_label.setFont(QFont("Menlo", 9, QFont.Bold))
+        self.value_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.value_label)
+        
+    def _on_change(self, value):
+        self.value_label.setText(str(value))
+        colors = {1: '#E53935', 2: '#FB8C00', 3: '#C0CA33', 4: '#43A047'}
+        self.value_label.setStyleSheet(f"color: {colors[value]}; font-weight: bold;")
+        self.callback(self.channel_id, value)
+    
+    def value(self):
+        return self.slider.value()
+    
+    def setValue(self, v):
+        self.slider.setValue(v)
+
+
+class Demo(QMainWindow):
+    def __init__(self, trial_lst, label_lst):
+        super().__init__()
+        self.setWindowTitle("Neural Recording Chip - Resolution Control")
+        self.setGeometry(100, 100, 1500, 900)
+        self.setStyleSheet("""
+            QMainWindow { background: #fafafa; }
+            QGroupBox { 
+                font-weight: bold; 
+                border: 1px solid #e0e0e0; 
+                border-radius: 6px; 
+                margin-top: 8px; 
+                padding-top: 8px;
+                background: white;
+            }
+            QGroupBox::title { 
+                subcontrol-origin: margin; 
+                left: 12px; 
+                padding: 0 6px;
+                color: #333;
+            }
+            QPushButton {
+                background: #2196F3;
+                color: white;
+                border: none;
+                padding: 10px 24px;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover { background: #1976D2; }
+            QPushButton:pressed { background: #1565C0; }
+            QLabel { color: #333; }
+        """)
+        
+        # Data
         self.data_gen = DummyDataGenerator(trial_lst, label_lst, num_channels=64)
         self.num_channels = 64
-        
-        # Resolution settings: current (being edited) and committed
-        self.resolution_settings = np.ones(self.num_channels, dtype=int) * 2  # Current slider values
-        self.committed_settings = np.ones(self.num_channels, dtype=int) * 2   # Submitted values
-        
-        # Data buffer for streaming (1 second at 1kHz)
+        self.resolution_settings = np.ones(self.num_channels, dtype=int) * 2
+        self.committed_settings = np.ones(self.num_channels, dtype=int) * 1
         self.voltage_buffer = self.data_gen.get_voltage_data(1)
-        
-        # Flag for running
-        self.is_running = True
-        
-        # Slider references
-        self.resolution_sliders = []
-        
-        # Plot line references for efficient updates
-        self.trace_lines = []
-        self.trace_axes = None
-
-        # Store previous accuracy
         self.previous = (None, None)
+        self.sliders = []
         
-        # Create UI
-        self.create_ui()
+        self._setup_ui()
+        self._init_plots()
         
-        # Initialize plots
-        self.init_voltage_traces()
-        self.plot_accuracy_vs_power()
-        self.plot_channel_importances()
+        # Timer for streaming at 60Hz
+        self.timer = QTimer()
+        self.timer.timeout.connect(self._update_traces)
+        self.timer.start(16)
         
-        # Start streaming updates at ~60 Hz (every 16ms)
-        self.schedule_update()
-        
-    def create_ui(self):
-        """Create the main UI with 4 quadrants."""
-        # Create main frame
-        main_frame = ttk.Frame(self.root)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+    def _setup_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QHBoxLayout(central)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(12)
         
         # Left panel
-        left_frame = ttk.Frame(main_frame, width=600)
-        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        left_frame.pack_propagate(False)
+        left = QWidget()
+        left.setFixedWidth(520)
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(10)
         
-        # Upper left: Accuracy vs Power
-        upper_left = ttk.LabelFrame(left_frame, text="Accuracy vs Power (Updates on Submit)")
-        upper_left.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # Accuracy plot
+        acc_group = QGroupBox("Accuracy vs Power")
+        acc_layout = QVBoxLayout(acc_group)
+        acc_layout.setContentsMargins(8, 12, 8, 8)
+        self.acc_plot = pg.PlotWidget()
+        self.acc_plot.setLabel('left', 'Accuracy')
+        self.acc_plot.setLabel('bottom', 'Power (μW)')
+        self.acc_plot.showGrid(x=True, y=True, alpha=0.15)
+        self.acc_plot.setLogMode(x=True, y=False)
+        self.acc_plot.getAxis('left').setStyle(tickFont=QFont("Helvetica", 9))
+        self.acc_plot.getAxis('bottom').setStyle(tickFont=QFont("Helvetica", 9))
+        acc_layout.addWidget(self.acc_plot)
+        left_layout.addWidget(acc_group, stretch=2)
         
-        self.fig_accuracy = Figure(figsize=(5, 3), dpi=100)
-        self.canvas_accuracy = FigureCanvasTkAgg(self.fig_accuracy, upper_left)
-        self.canvas_accuracy.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        # Channel importance plot
+        imp_group = QGroupBox("Channel Importance")
+        imp_layout = QVBoxLayout(imp_group)
+        imp_layout.setContentsMargins(8, 12, 8, 8)
+        self.imp_plot = pg.PlotWidget()
+        self.imp_plot.setLabel('left', 'Importance')
+        self.imp_plot.setLabel('bottom', 'Channel')
+        self.imp_plot.showGrid(x=False, y=True, alpha=0.15)
+        self.imp_plot.getAxis('left').setStyle(tickFont=QFont("Helvetica", 9))
+        self.imp_plot.getAxis('bottom').setStyle(tickFont=QFont("Helvetica", 9))
+        imp_layout.addWidget(self.imp_plot)
+        left_layout.addWidget(imp_group, stretch=2)
         
-        # Lower left: Channel importances
-        lower_left = ttk.LabelFrame(left_frame, text="Channel Importances & Resolution")
-        lower_left.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # Resolution controls
+        ctrl_group = QGroupBox("Resolution Settings")
+        ctrl_layout = QVBoxLayout(ctrl_group)
+        ctrl_layout.setContentsMargins(8, 12, 8, 8)
         
-        self.fig_channels = Figure(figsize=(5, 2.5), dpi=100)
-        self.canvas_channels = FigureCanvasTkAgg(self.fig_channels, lower_left)
-        self.canvas_channels.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
         
-        # Resolution control area with scrollbar
-        control_frame = ttk.LabelFrame(left_frame, text="Channel Resolution Settings (1=Low, 4=High)")
-        control_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        slider_container = QWidget()
+        slider_container.setStyleSheet("background: transparent;")
+        grid = QGridLayout(slider_container)
+        grid.setSpacing(2)
+        grid.setContentsMargins(0, 0, 0, 0)
         
-        # Create canvas with scrollbar for sliders
-        canvas_container = ttk.Frame(control_frame)
-        canvas_container.pack(fill=tk.BOTH, expand=True)
-        
-        scrollbar = ttk.Scrollbar(canvas_container, orient=tk.VERTICAL)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        self.slider_canvas = tk.Canvas(canvas_container, yscrollcommand=scrollbar.set, height=150)
-        self.slider_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.slider_canvas.yview)
-        
-        slider_frame = ttk.Frame(self.slider_canvas)
-        self.slider_canvas.create_window((0, 0), window=slider_frame, anchor='nw')
-        
-        # Create sliders in a grid (4 per row)
         for i in range(self.num_channels):
-            row = i // 4
-            col = i % 4
-            
-            cell_frame = ttk.Frame(slider_frame)
-            cell_frame.grid(row=row, column=col, padx=2, pady=1, sticky='ew')
-            
-            label = ttk.Label(cell_frame, text=f"Ch{i:02d}", width=5)
-            label.pack(side=tk.LEFT)
-            
-            value_label = ttk.Label(cell_frame, text="2", width=2)
-            
-            slider = ttk.Scale(cell_frame, from_=1, to=4, orient=tk.HORIZONTAL, length=80)
-            
-            # Store reference BEFORE setting value
-            self.resolution_sliders.append((slider, value_label))
-            
-            # Configure command and set value
-            slider.configure(command=lambda val, ch=i: self.on_resolution_changed(ch, val))
-            slider.set(2)
-            slider.pack(side=tk.LEFT, padx=2)
-            
-            value_label.pack(side=tk.LEFT)
+            slider = ChannelSlider(i, self._on_resolution_changed)
+            self.sliders.append(slider)
+            grid.addWidget(slider, i // 4, i % 4)
         
-        slider_frame.update_idletasks()
-        self.slider_canvas.config(scrollregion=self.slider_canvas.bbox("all"))
+        scroll.setWidget(slider_container)
+        ctrl_layout.addWidget(scroll)
         
         # Submit button
-        button_frame = ttk.Frame(left_frame)
-        button_frame.pack(fill=tk.X, padx=5, pady=10)
+        btn_layout = QHBoxLayout()
+        self.submit_btn = QPushButton("Submit Settings")
+        self.submit_btn.clicked.connect(self._on_submit)
+        btn_layout.addWidget(self.submit_btn)
         
-        self.submit_button = ttk.Button(
-            button_frame, 
-            text="Submit Channel Assignments", 
-            command=self.on_submit_settings
-        )
-        self.submit_button.pack(side=tk.LEFT, padx=5)
+        self.status = QLabel("")
+        self.status.setStyleSheet("color: #43A047; font-weight: bold;")
+        btn_layout.addWidget(self.status)
+        btn_layout.addStretch()
+        ctrl_layout.addLayout(btn_layout)
         
-        self.status_label = ttk.Label(button_frame, text="Settings not yet submitted", foreground='gray')
-        self.status_label.pack(side=tk.LEFT, padx=10)
+        left_layout.addWidget(ctrl_group, stretch=3)
+        main_layout.addWidget(left)
         
-        # Right panel: Voltage traces
-        right_frame = ttk.LabelFrame(main_frame, text="Raw Voltage Traces (64 Channels) - 60Hz Update")
-        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # Right panel - Voltage traces
+        trace_group = QGroupBox("Voltage Traces (64 Ch)")
+        trace_layout = QVBoxLayout(trace_group)
+        trace_layout.setContentsMargins(8, 12, 8, 8)
         
-        self.fig_traces = Figure(figsize=(8, 8), dpi=100)
-        self.canvas_traces = FigureCanvasTkAgg(self.fig_traces, right_frame)
-        self.canvas_traces.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        # Create 8x8 grid of plots
+        self.trace_widget = pg.GraphicsLayoutWidget()
+        self.trace_widget.setBackground('w')
+        self.trace_plots = []
+        self.trace_curves = []
         
-    def on_resolution_changed(self, channel, value):
-        """Handle resolution slider changes - only updates stem plot."""
-        int_value = int(round(float(value)))
-        self.resolution_settings[channel] = int_value
+        for row in range(8):
+            for col in range(8):
+                ch = row * 8 + col
+                p = self.trace_widget.addPlot(row=row, col=col)
+                p.hideAxis('left')
+                p.hideAxis('bottom')
+                p.setYRange(-100, 100)
+                p.setXRange(0, 1)
+                p.setMouseEnabled(x=False, y=False)
+                
+                # Channel label
+                label = pg.TextItem(f"{ch}", color='#888', anchor=(0, 0))
+                label.setFont(QFont("Helvetica", 7))
+                label.setPos(0.02, 90)
+                p.addItem(label)
+                
+                curve = p.plot(pen=pg.mkPen('#333', width=1))
+                self.trace_plots.append(p)
+                self.trace_curves.append(curve)
         
-        # Update the value label
-        if channel < len(self.resolution_sliders):
-            slider, label = self.resolution_sliders[channel]
-            label.config(text=str(int_value))
+        trace_layout.addWidget(self.trace_widget)
+        main_layout.addWidget(trace_group, stretch=1)
         
-        # Only redraw the stem plot (not accuracy plot)
-        self.plot_channel_importances()
+    def _init_plots(self):
+        self._plot_accuracy()
+        self._plot_importance()
+        self._update_traces()
         
-    def on_submit_settings(self):
-        """Handle submit button - commits settings and updates accuracy plot."""
-        # Copy current settings to committed settings
+    def _on_resolution_changed(self, channel, value):
+        self.resolution_settings[channel] = value
+        self._plot_importance()
+        
+    def _on_submit(self):
         self.committed_settings = self.resolution_settings.copy()
+        self._plot_accuracy()
+        self.status.setText("✓ Submitted")
+        QTimer.singleShot(2000, lambda: self.status.setText(""))
         
-        # Update the accuracy plot with new settings
-        self.plot_accuracy_vs_power()
-        
-        # Update status
-        self.status_label.config(text="Settings submitted!", foreground='green')
-        self.root.after(2000, lambda: self.status_label.config(text="", foreground='gray'))
-        
-    def plot_accuracy_vs_power(self):
-        """Plot accuracy vs power tradeoff - only called on submit."""
-        self.fig_accuracy.clear()
-        ax = self.fig_accuracy.add_subplot(111)
+    def _plot_accuracy(self):
+        self.acc_plot.clear()
         
         power, accuracy = self.data_gen.get_power_accuracy_curve()
-        rr_acc, rr_power = self.data_gen.get_reconfiguration_point(settings=[self.committed_settings for i in range(5)])
-
-        # Calculate current operating point based on COMMITTED settings
-        avg_resolution = np.mean(self.committed_settings)
-        current_power = 50 + avg_resolution * 200  # Simplified power model
-        current_accuracy = 0.5 + 0.45 * (1 - np.exp(-current_power / 200))
+        rr_acc, rr_power = self.data_gen.get_reconfiguration_point(
+            settings=[self.committed_settings for _ in range(5)]
+        )
         
-        ax.plot(power, accuracy, 'b-', linewidth=2, label='Tradeoff Curve')
-        ax.fill_between(power, 0.5, accuracy, alpha=0.2)
-        ax.scatter(rr_power, rr_acc, c='red', s=10, zorder=5, alpha=0.5)
-        ax.scatter(np.mean(rr_power), np.mean(rr_acc), c='red', s=10, zorder=5, 
-                   label=f'Current: {current_accuracy:.2%}', marker='*')
-        if (self.previous != (None, None)):
-            prev_power, prev_acc = self.previous
-            ax.plot([prev_power, np.mean(rr_power)], [prev_acc, np.mean(rr_acc)], 'k--', linewidth=1, marker='*', color='green',
-                    label='Change')
-        ax.set_xlabel('Power (uW)')
-        ax.set_ylabel('Classifier Accuracy')
-        ax.set_title('Accuracy vs Power Tradeoff')
-        ax.legend(loc='lower right')
-        ax.grid(True, alpha=0.3)
-        ax.semilogx()
-        # ax.set_ylim([0.5, 1.0])
-        # ax.set_xlim([0, 1100])
-        self.previous = (np.mean(rr_power), np.mean(rr_acc))
+        # Tradeoff curve
+        self.acc_plot.plot(power, accuracy, pen=pg.mkPen('#2196F3', width=2))
         
-        self.fig_accuracy.tight_layout()
-        self.canvas_accuracy.draw()
+        # Fill under curve
+        fill = pg.FillBetweenItem(
+            pg.PlotDataItem(power, accuracy),
+            pg.PlotDataItem(power, np.full_like(accuracy, 0.5)),
+            brush=pg.mkBrush('#2196F320')
+        )
+        self.acc_plot.addItem(fill)
         
-    def plot_channel_importances(self):
-        """Plot stem plot of channel importances with resolution overlay."""
-        self.fig_channels.clear()
-        ax = self.fig_channels.add_subplot(111)
+        # Current point scatter
+        self.acc_plot.plot(
+            rr_power, rr_acc, 
+            pen=None, symbol='o', symbolSize=6,
+            symbolBrush='#E5393580', symbolPen=None
+        )
+        
+        # Mean current point
+        mean_pow, mean_acc = np.mean(rr_power), np.mean(rr_acc)
+        self.acc_plot.plot(
+            [mean_pow], [mean_acc],
+            pen=None, symbol='star', symbolSize=14,
+            symbolBrush='#E53935', symbolPen=pg.mkPen('#B71C1C', width=1)
+        )
+        
+        # Previous point connection
+        if self.previous[0] is not None:
+            prev_pow, prev_acc = self.previous
+            self.acc_plot.plot(
+                [prev_pow, mean_pow], [prev_acc, mean_acc],
+                pen=pg.mkPen('#43A047', width=2, style=Qt.DashLine)
+            )
+            self.acc_plot.plot(
+                [prev_pow], [prev_acc],
+                pen=None, symbol='star', symbolSize=10,
+                symbolBrush='#43A047', symbolPen=None
+            )
+        
+        self.previous = (mean_pow, mean_acc)
+        
+    def _plot_importance(self):
+        self.imp_plot.clear()
         
         importances = self.data_gen.get_channel_importances()
         channels = np.arange(self.num_channels)
         
-        # Color map for resolution settings (1=red, 2=orange, 3=yellow-green, 4=green)
-        color_map = {1: '#d62728', 2: '#ff7f0e', 3: '#bcbd22', 4: '#2ca02c'}
-        colors = [color_map[r] for r in self.resolution_settings]
+        colors = {1: '#E53935', 2: '#FB8C00', 3: '#C0CA33', 4: '#43A047'}
+        brushes = [pg.mkBrush(colors[r]) for r in self.resolution_settings]
         
-        # Draw BLACK stem lines
-        ax.vlines(channels, 0, importances, colors='black', linewidth=1.5)
+        # Black stems
+        for i, imp in enumerate(importances):
+            self.imp_plot.plot(
+                [i, i], [0, imp], 
+                pen=pg.mkPen('#333', width=1.5)
+            )
         
-        # Add colored markers (bulbs) on top based on resolution setting
-        ax.scatter(channels, importances, c=colors, s=50, zorder=5, edgecolors='black', linewidth=0.5)
+        # Colored dots
+        scatter = pg.ScatterPlotItem(
+            x=channels, y=importances,
+            size=10, brush=brushes,
+            pen=pg.mkPen('#333', width=0.5)
+        )
+        self.imp_plot.addItem(scatter)
+        self.imp_plot.setXRange(-1, self.num_channels)
+        self.imp_plot.setYRange(0, max(importances) * 1.15)
         
-        ax.set_xlabel('Channel #')
-        ax.set_ylabel('Importance')
-        ax.set_title('Channel Importances (Bulb Color = Resolution: Red=1, Orange=2, Yellow-Green=3, Green=4)')
-        ax.set_xlim([-1, self.num_channels])
-        ax.set_ylim([0, max(importances) * 1.15])
-        ax.grid(True, alpha=0.3, axis='y')
-        
-        self.fig_channels.tight_layout()
-        self.canvas_channels.draw()
-        
-    def init_voltage_traces(self):
-        """Initialize voltage trace subplots with line objects for efficient updates."""
-        self.fig_traces.clear()
-        
-        # Create 64 subplots in an 8x8 grid
-        self.trace_axes = self.fig_traces.subplots(8, 8)
-        
-        # Time vector (1 second at 1kHz, downsampled to ~60 points for display)
-        self.display_samples = 60  # ~60 points for smooth display
-        t = np.linspace(0, 1, self.display_samples)
-        
-        self.trace_lines = []
-        
-        for ch in range(self.num_channels):
-            row = ch // 8
-            col = ch % 8
-            ax = self.trace_axes[row, col]
-            
-            # Create line object (will update data later)
-            line, = ax.plot(t, np.zeros(self.display_samples), 'k-', linewidth=0.5)
-            self.trace_lines.append(line)
-            
-            ax.set_ylim([-100, 100])
-            ax.set_xlim([0, 1])
-            ax.set_xticks([])
-            ax.set_yticks([])
-            
-            # Remove spines
-            for spine in ax.spines.values():
-                spine.set_visible(False)
-            
-            # Add channel label
-            ax.text(0.02, 0.95, f'{ch}', transform=ax.transAxes, 
-                   fontsize=6, verticalalignment='top', fontweight='bold')
-        
-        self.fig_traces.suptitle('Streaming Neural Data (1kHz sampled, 60Hz display)', fontsize=10)
-        self.fig_traces.tight_layout(rect=[0, 0, 1, 0.97])
-        self.canvas_traces.draw()
-        
-    def update_voltage_traces(self):
-        """Efficiently update voltage traces using blitting-like approach."""
-        # Downsample 1000 samples to display_samples for plotting
-        downsample_factor = self.voltage_buffer.shape[1] // self.display_samples
-        
-        for ch in range(self.num_channels):
-            # Downsample data
-            data = self.voltage_buffer[ch, ::downsample_factor][:self.display_samples]
-            self.trace_lines[ch].set_ydata(data)
-        
-        # Redraw only the canvas (more efficient than full redraw)
-        self.canvas_traces.draw_idle()
-        
-    def update_data(self):
-        """Update streaming data at ~60Hz."""
-        if not self.is_running:
-            return
-            
-        # Generate new voltage data (1 second buffer at 1kHz)
+    def _update_traces(self):
         self.voltage_buffer = self.data_gen.get_voltage_data(1)
+        t = np.linspace(0, 1, 60)
         
-        # Update voltage traces efficiently
-        self.update_voltage_traces()
-        
-        # Schedule next update
-        self.schedule_update()
-    
-    def schedule_update(self):
-        """Schedule the next data update at ~60Hz."""
-        if self.is_running:
-            self.root.after(16, self.update_data)  # ~60 Hz (1000ms / 60 ≈ 16ms)
+        for ch in range(self.num_channels):
+            data = self.voltage_buffer[ch, ::16][:60]
+            self.trace_curves[ch].setData(t, data)
+            
+    def closeEvent(self, event):
+        self.timer.stop()
+        event.accept()
 
 
 def main():
-    splits = 4
-    trial_lst, label_lst = build_dataset(filename='Playback/emg/user1/adc_raw_{trial}_21_{setting}.npz', splits=4, raw=False)
-
-    root = tk.Tk()
+    trial_lst, label_lst = build_dataset(
+        filename='Playback/emg/user1/adc_raw_{trial}_21_{setting}.npz', 
+        splits=4, raw=False
+    )
     
-    # Set a nice style
-    style = ttk.Style()
-    style.theme_use('clam')
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')
     
-    demo = Demo(root, trial_lst, label_lst)
+    # Light palette
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor(250, 250, 250))
+    palette.setColor(QPalette.WindowText, QColor(51, 51, 51))
+    palette.setColor(QPalette.Base, QColor(255, 255, 255))
+    palette.setColor(QPalette.AlternateBase, QColor(245, 245, 245))
+    app.setPalette(palette)
     
-    def on_closing():
-        demo.is_running = False
-        root.quit()
-        root.destroy()
-    
-    root.protocol("WM_DELETE_WINDOW", on_closing)
-    root.mainloop()
+    demo = Demo(trial_lst, label_lst)
+    demo.show()
+    sys.exit(app.exec_())
 
 
 if __name__ == '__main__':

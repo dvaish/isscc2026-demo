@@ -281,13 +281,13 @@ if __name__ == "__main__":
     # %%
     base_acc_arr, base_weights_arr = run_enob_sweep(trial_lst, label_lst, [0, 1, 2, 3], C=10)
 
-    # # %%
-    # sparse_accs = []
-    # sparse_weights = []
-    # for i in range(4):
-    #     sparse_acc_arr, sparse_weights_arr = run_sparse_model(trial_lst, label_lst, [3, 2, 1, 0], i)
-    #     sparse_accs.append(sparse_acc_arr)
-    #     sparse_weights.append(sparse_weights_arr)
+    # %%
+    sparse_accs = []
+    sparse_weights = []
+    for i in range(4):
+        sparse_acc_arr, sparse_weights_arr = run_sparse_model(trial_lst, label_lst, [3, 2, 1, 0], i)
+        sparse_accs.append(sparse_acc_arr)
+        sparse_weights.append(sparse_weights_arr)
 
 
     # %%
