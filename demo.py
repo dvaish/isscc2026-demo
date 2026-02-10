@@ -27,8 +27,12 @@ pg.setConfigOptions(antialias=True, background='w', foreground='k')
 STREAMER_HOST = 'localhost'
 STREAMER_PORT = 5555
 NUM_CHANNELS = 64
+DISPLAY_CHANNELS = 16  # Only display first 16 channels
+NUM_CLASSES = 12  # Number of logit classes
 CHUNK_SIZE = 33  # Samples per chunk from streamer
 DISPLAY_SAMPLES = 1000  # 1 second of data to display (1kHz)
+MAV_WINDOW = 50  # 50ms MAV window at 1kHz
+MAV_SAMPLES = DISPLAY_SAMPLES // MAV_WINDOW  # Number of MAV points in 1 second
 
 
 class SocketReceiver(QThread):
@@ -118,8 +122,11 @@ class DataGenerator:
         self.label_lst = label_lst
         self.num_channels = num_channels
         
-        self.channel_importances = np.load("sparse_weights.npy")
-        self.channel_importances = np.mean(self.channel_importances, axis=(0, 1))
+        inital_accs, initial_weights, initial_settings = run_adaptive_model(    
+            self.trial_lst, self.label_lst, 
+            enabled_settings=[0, 1, 2, 3]
+        )
+        self.channel_importances = initial_weights[0]
         
         self.power_levels = settings_to_pow[0] * (1 + np.arange(self.num_channels))[::-1]
         self.accuracy = np.load("sparse_accuracies.npy")
@@ -141,11 +148,13 @@ class DataGenerator:
             self.trial_lst, self.label_lst, 
             enabled_settings=[0, 1, 2, 3], sim_settings=settings, selection=selection, mode=mode
         )
+        settings_arr = np.array(settings_arr)
         self.reconfig_accs = acc_arr
         self.reconfig_weights = weights_arr
         self.reconfig_settings = settings_arr
         powers = settings_to_pow[settings_arr]
-        return np.array(acc_arr), np.sum(np.array(powers), axis=-1)
+        print(self.reconfig_weights)
+        return np.array(acc_arr), np.sum(powers, axis=-1)
 
 
 class ChannelSlider(QWidget):
@@ -169,7 +178,7 @@ class ChannelSlider(QWidget):
         
         # Slider
         self.slider = QSlider(Qt.Horizontal)
-        self.slider.setRange(1, 4)
+        self.slider.setRange(0, 4)
         self.slider.setValue(init)
         self.slider.setFixedWidth(60)
         self.slider.setStyleSheet("""
@@ -201,7 +210,7 @@ class ChannelSlider(QWidget):
         
     def _on_change(self, value):
         self.value_label.setText(str(value))
-        colors = {1: '#E53935', 2: '#FB8C00', 3: '#C0CA33', 4: '#43A047'}
+        colors = {0: '#9E9E9E', 1: '#E53935', 2: '#FB8C00', 3: '#C0CA33', 4: '#43A047'}
         self.value_label.setStyleSheet(f"color: {colors[value]}; font-weight: bold;")
         self.callback(self.channel_id, value)
     
@@ -254,6 +263,11 @@ class Demo(QMainWindow):
         self.resolution_settings = self.initial_setting.copy()
         self.committed_settings = self.initial_setting.copy()
         self.voltage_buffer = np.zeros((self.num_channels, DISPLAY_SAMPLES))  # Rolling 1s buffer
+        self.mav_buffer = np.zeros((DISPLAY_CHANNELS, MAV_SAMPLES))  # MAV buffer for display channels
+        self.logits_buffer = np.zeros((NUM_CLASSES, MAV_SAMPLES))  # Logits buffer
+        self.mav_position = 0  # Track position in MAV window
+        self.mav_accumulator = np.zeros((DISPLAY_CHANNELS,))  # Accumulate samples for MAV
+        self.mav_count = 0  # Count samples in current MAV window
         self.previous = []
         self.sliders = []
         
@@ -428,7 +442,7 @@ class Demo(QMainWindow):
             }
             QSpinBox:hover { border-color: #43A047; }
         """)
-        btn_layout.addWidget(self.channel_drop)
+        # btn_layout.addWidget(self.channel_drop)
         
         self.status = QLabel("")
         self.status.setStyleSheet("color: #43A047; font-weight: bold;")
@@ -439,20 +453,25 @@ class Demo(QMainWindow):
         left_layout.addWidget(ctrl_group, stretch=3)
         main_layout.addWidget(left)
         
-        # Right panel - Voltage traces
-        trace_group = QGroupBox("Voltage Traces (64 Ch)")
+        # Right panel - Three sections: Raw traces, MAV traces, Logits
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
+        
+        # Raw Voltage Traces (16 channels in 4x4 grid)
+        trace_group = QGroupBox("Raw Voltage Traces (16 Ch)")
         trace_layout = QVBoxLayout(trace_group)
         trace_layout.setContentsMargins(8, 12, 8, 8)
         
-        # Create 8x8 grid of plots
         self.trace_widget = pg.GraphicsLayoutWidget()
         self.trace_widget.setBackground('w')
         self.trace_plots = []
         self.trace_curves = []
         
-        for row in range(8):
-            for col in range(8):
-                ch = row * 8 + col
+        for row in range(4):
+            for col in range(4):
+                ch = row * 4 + col
                 p = self.trace_widget.addPlot(row=row, col=col)
                 p.hideAxis('left')
                 p.hideAxis('bottom')
@@ -471,7 +490,73 @@ class Demo(QMainWindow):
                 self.trace_curves.append(curve)
         
         trace_layout.addWidget(self.trace_widget)
-        main_layout.addWidget(trace_group, stretch=1)
+        right_layout.addWidget(trace_group, stretch=2)
+        
+        # MAV Traces (16 channels in 4x4 grid)
+        mav_group = QGroupBox("Mean Absolute Value (50ms windows)")
+        mav_layout = QVBoxLayout(mav_group)
+        mav_layout.setContentsMargins(8, 12, 8, 8)
+        
+        self.mav_widget = pg.GraphicsLayoutWidget()
+        self.mav_widget.setBackground('w')
+        self.mav_plots = []
+        self.mav_curves = []
+        
+        for row in range(4):
+            for col in range(4):
+                ch = row * 4 + col
+                p = self.mav_widget.addPlot(row=row, col=col)
+                p.hideAxis('left')
+                p.hideAxis('bottom')
+                p.setYRange(0, 50)
+                p.setXRange(0, 1)
+                p.setMouseEnabled(x=False, y=False)
+                
+                # Channel label
+                label = pg.TextItem(f"{ch}", color='#888', anchor=(0, 0))
+                label.setFont(QFont("Helvetica", 7))
+                label.setPos(0.02, 45)
+                p.addItem(label)
+                
+                curve = p.plot(pen=pg.mkPen('#2196F3', width=1))
+                self.mav_plots.append(p)
+                self.mav_curves.append(curve)
+        
+        mav_layout.addWidget(self.mav_widget)
+        right_layout.addWidget(mav_group, stretch=2)
+        
+        # Logits Traces (12 classes in 1x12 row)
+        logits_group = QGroupBox("Class Logits (12 Classes)")
+        logits_layout = QVBoxLayout(logits_group)
+        logits_layout.setContentsMargins(8, 12, 8, 8)
+        
+        self.logits_widget = pg.GraphicsLayoutWidget()
+        self.logits_widget.setBackground('w')
+        self.logits_plots = []
+        self.logits_curves = []
+        
+        for i in range(NUM_CLASSES):
+            p = self.logits_widget.addPlot(row=0, col=i)
+            p.hideAxis('left')
+            p.hideAxis('bottom')
+            p.setYRange(-1, 1)
+            p.setXRange(0, 1)
+            p.setMouseEnabled(x=False, y=False)
+            
+            # Class label
+            label = pg.TextItem(f"C{i}", color='#888', anchor=(0, 0))
+            label.setFont(QFont("Helvetica", 7))
+            label.setPos(0.02, 0.9)
+            p.addItem(label)
+            
+            curve = p.plot(pen=pg.mkPen('#E53935', width=1))
+            self.logits_plots.append(p)
+            self.logits_curves.append(curve)
+        
+        logits_layout.addWidget(self.logits_widget)
+        right_layout.addWidget(logits_group, stretch=1)
+        
+        main_layout.addWidget(right, stretch=1)
         
     def _init_plots(self):
         self._plot_accuracy()
@@ -576,7 +661,7 @@ class Demo(QMainWindow):
         importances = self.data_gen.get_channel_importances()
         channels = np.arange(self.num_channels)
         
-        colors = {1: '#E53935', 2: '#FB8C00', 3: '#C0CA33', 4: '#43A047', 5:'#A9A9A9'}
+        colors = {0: '#9E9E9E', 1: '#E53935', 2: '#FB8C00', 3: '#C0CA33', 4: '#43A047'}
         brushes = [pg.mkBrush(colors[r]) for r in self.resolution_settings]
         
         # Black stems
@@ -597,20 +682,54 @@ class Demo(QMainWindow):
         self.imp_plot.setYRange(0, max(importances) * 1.15)
         
     def _update_traces(self):
-        """Update voltage trace plots from buffered socket data."""
-        t = np.linspace(0, 1, 100)  # 100 display points over 1 second
+        """Update all trace plots from buffered data."""
+        t_raw = np.linspace(0, 1, 100)  # 100 display points over 1 second
+        t_mav = np.linspace(0, 1, MAV_SAMPLES)  # MAV points over 1 second
         
-        for ch in range(self.num_channels):
+        # Update raw voltage traces (first 16 channels)
+        for ch in range(DISPLAY_CHANNELS):
             # Downsample 1000 samples to 100 points for display
             data = self.voltage_buffer[ch, ::10]
-            self.trace_curves[ch].setData(t, data)
+            self.trace_curves[ch].setData(t_raw, data)
+        
+        # Update MAV traces
+        for ch in range(DISPLAY_CHANNELS):
+            self.mav_curves[ch].setData(t_mav, self.mav_buffer[ch])
+        
+        # Update logits traces
+        for i in range(NUM_CLASSES):
+            self.logits_curves[i].setData(t_mav, self.logits_buffer[i])
     
     def _on_data_received(self, data):
-        """Handle incoming voltage data from socket - append to rolling buffer."""
+        """Handle incoming voltage data from socket - append to rolling buffer and compute MAV."""
         num_new = data.shape[1]
-        # Shift buffer left and append new data
+        
+        # Update voltage buffer (all 64 channels)
         self.voltage_buffer = np.roll(self.voltage_buffer, -num_new, axis=1)
         self.voltage_buffer[:, -num_new:] = data
+        
+        # Compute MAV for display channels (first 16)
+        for i in range(num_new):
+            # Accumulate absolute values for MAV
+            self.mav_accumulator += np.abs(data[:DISPLAY_CHANNELS, i])
+            self.mav_count += 1
+            
+            # When we have a full window, compute MAV and shift buffer
+            if self.mav_count >= MAV_WINDOW:
+                mav_value = self.mav_accumulator / MAV_WINDOW
+                
+                # Shift MAV buffer and add new value
+                self.mav_buffer = np.roll(self.mav_buffer, -1, axis=1)
+                self.mav_buffer[:, -1] = mav_value
+                
+                # Shift logits buffer and add placeholder (you can replace with actual logits)
+                self.logits_buffer = np.roll(self.logits_buffer, -1, axis=1)
+                # Placeholder: random logits for now - replace with actual model output
+                self.logits_buffer[:, -1] = np.zeros(NUM_CLASSES)
+                
+                # Reset accumulator
+                self.mav_accumulator = np.zeros((DISPLAY_CHANNELS,))
+                self.mav_count = 0
     
     def _on_socket_connected(self):
         """Handle socket connection."""

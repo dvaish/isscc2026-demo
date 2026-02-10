@@ -213,9 +213,8 @@ def run_adaptive_model(trials_data, trials_labels, enabled_settings=[0, 1, 2, 3]
         else:
             num_settings = len(enabled_settings)
             curr_weights = get_log_reg_weights(model, x_train, y_train)
-            print(curr_weights)
             if mode == 'exponential':
-                curr_weights = np.exp(curr_weights) / np.sum(np.exp(curr_weights)) # Implement a softmax distribution
+                curr_weights = np.exp(curr_weights)
             elif mode == 'quadratic':
                 curr_weights = curr_weights**2
             bin_size = (max(curr_weights)-min(curr_weights))/num_settings
