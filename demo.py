@@ -86,7 +86,7 @@ class SocketReceiver(QThread):
                     size = struct.unpack('I', size_data)[0]
                     data_bytes = self._recv_exact(size)
                     data = np.frombuffer(data_bytes, dtype=np.float32)
-                    data = data.reshape(NUM_CHANNELS, -1)
+                    data = data.reshape(DISPLAY_CHANNELS, -1)
                     self.data_received.emit(data)
             except Exception as e:
                 raise e
@@ -153,7 +153,6 @@ class DataGenerator:
         self.reconfig_weights = weights_arr
         self.reconfig_settings = settings_arr
         powers = settings_to_pow[settings_arr]
-        print(self.reconfig_weights)
         return np.array(acc_arr), np.sum(powers, axis=-1)
 
 
@@ -475,7 +474,8 @@ class Demo(QMainWindow):
                 p = self.trace_widget.addPlot(row=row, col=col)
                 p.hideAxis('left')
                 p.hideAxis('bottom')
-                p.setYRange(-100, 100)
+                # p.setYRange(0, 2 ** 16)
+                p.enableAutoRange(axis='y', enable=True)
                 p.setXRange(0, 1)
                 p.setMouseEnabled(x=False, y=False)
                 
@@ -508,7 +508,8 @@ class Demo(QMainWindow):
                 p = self.mav_widget.addPlot(row=row, col=col)
                 p.hideAxis('left')
                 p.hideAxis('bottom')
-                p.setYRange(0, 50)
+                # p.setYRange(0, 50)
+                p.enableAutoRange(axis='y', enable=True)
                 p.setXRange(0, 1)
                 p.setMouseEnabled(x=False, y=False)
                 
@@ -683,13 +684,13 @@ class Demo(QMainWindow):
         
     def _update_traces(self):
         """Update all trace plots from buffered data."""
-        t_raw = np.linspace(0, 1, 100)  # 100 display points over 1 second
+        t_raw = np.linspace(0, 1, 1000)  # 1000 display points over 1 second
         t_mav = np.linspace(0, 1, MAV_SAMPLES)  # MAV points over 1 second
         
         # Update raw voltage traces (first 16 channels)
         for ch in range(DISPLAY_CHANNELS):
             # Downsample 1000 samples to 100 points for display
-            data = self.voltage_buffer[ch, ::10]
+            data = self.voltage_buffer[ch, :]
             self.trace_curves[ch].setData(t_raw, data)
         
         # Update MAV traces
@@ -706,7 +707,7 @@ class Demo(QMainWindow):
         
         # Update voltage buffer (all 64 channels)
         self.voltage_buffer = np.roll(self.voltage_buffer, -num_new, axis=1)
-        self.voltage_buffer[:, -num_new:] = data
+        self.voltage_buffer[:DISPLAY_CHANNELS, -num_new:] = data
         
         # Compute MAV for display channels (first 16)
         for i in range(num_new):
