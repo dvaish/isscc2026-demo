@@ -197,8 +197,6 @@ def run_adaptive_model(trials_data, trials_labels, enabled_settings=[0, 1, 2, 3]
     if train_setting is None:
         train_setting = min(enabled_settings)
     trials_data_s = select_noise_floors(trials_data, train_setting)
-    nch, _ = trials_data_s[0].shape
-    trials_labels_s = [l[0] for l in trials_labels]
 
     acc_arr, weights_arr, settings_arr = [], [], []
     for i in range(5):
@@ -275,7 +273,40 @@ def run_adaptive_model(trials_data, trials_labels, enabled_settings=[0, 1, 2, 3]
         print(settings)
         # ax[1].hist(settings, bins=range(-1, 5))
         
-    return acc_arr, weights_arr, settings_arr
+        # thresholds = np.array([-0.5]+list(
+        # np.arange(0.5, num_settings, 1))+[num_settings+0.5])
+        # fig, ax = plt.subplots(2) # sharex=True)
+        # ax[0].plot(curr_weights)
+        # ax[0].plot(weights)
+        
+        # For now, just set the lowest weights to 0, don't remap the settings.
+        settings = np.zeros(weights.shape).astype(int)
+        for idx in range(num_settings+1):
+            arg = (weights <= thresholds[idx+1]) & (weights >= thresholds[idx])
+            settings = np.where(arg, idx, settings)
+
+        # Settings goes from 0 to n where n represents "best" setting
+        # and 0 represents worst setting
+        # In the real array, noise index 0 corresponds to best, and n to worst. 
+        # ax[1].plot(settings)
+
+        settings = (num_settings - 1) - settings
+        settings = enabled_settings[settings]
+
+    sorted_weight_idcs = np.argsort(weights)
+    dropped_idcs = sorted_weight_idcs[:selection]
+    settings_p = settings.copy()
+
+    trials_data_sel = select_noise_floors(trials_data, settings_p)
+    x_retrain = np.concatenate(
+            trials_data_sel[:trial]+trials_data_sel[trial+1:], axis=-1).T
+    x_retrain[:, dropped_idcs] = 0
+    scaler, model = build_log_reg_model(x_retrain, y_train, C=C)
+    x_test = trials_data_sel[trial].T
+    x_test[:, dropped_idcs] = 0
+    accuracy = get_test_accuracy(x_test, y_test, model, scaler)
+    
+    return accuracy, weights, settings
 
 settings_to_pow = np.array([2.21E-06, 6.40E-07, 2.22E-07, 1.50E-07]) * 0.8
 
@@ -283,7 +314,8 @@ if __name__ == "__main__":
 
     # %%
     splits = 4
-    trial_lst, label_lst = build_dataset(filename='Playback/emg/user1/adc_raw_{trial}_21_{setting}.npz', splits=4, raw=False)
+    user = 5
+    trial_lst, label_lst = build_dataset(filename=f'Playback/emg/user{user}/adc_raw_{{trial}}_21_{{setting}}.npz', splits=4, raw=False)
     trial_lst = np.array(trial_lst)
 
     data = np.array(trial_lst)
@@ -296,12 +328,13 @@ if __name__ == "__main__":
     base_acc_arr, base_weights_arr = run_enob_sweep(trial_lst, label_lst, [0, 1, 2, 3], C=10)
 
     # %%
-    # sparse_accs = []
-    # sparse_weights = []
-    # for i in range(4):
-    #     sparse_acc_arr, sparse_weights_arr = run_sparse_model(trial_lst, label_lst, [3, 2, 1, 0], i)
-    #     sparse_accs.append(sparse_acc_arr)
-    #     sparse_weights.append(sparse_weights_arr)
+    sparse_accs = []
+    sparse_weights = []
+    sparse_acc_arr, sparse_weights_arr = run_sparse_model(trial_lst, label_lst, [3, 2, 1, 0], 0)
+    sparse_accs.append(sparse_acc_arr)
+    sparse_weights.append(sparse_weights_arr)
+
+    np.save(f"sparse_accuracies_user{user}.npy", sparse_accs)
 
 
     # %%
