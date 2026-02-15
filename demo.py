@@ -124,13 +124,16 @@ class DataGenerator:
         
         inital_accs, initial_weights, initial_settings = run_adaptive_model(    
             self.trial_lst, self.label_lst, 
-            enabled_settings=[0, 1, 2, 3]
+            enabled_settings=[0, 1, 2, 3], train_setting=3
         )
-        self.channel_importances = initial_weights[0]
+        print(inital_accs)
+        self.channel_importances = initial_weights
         
+        setting = 0
+        trial = 0
         self.power_levels = settings_to_pow[0] * (1 + np.arange(self.num_channels))[::-1]
-        self.accuracy = np.load("sparse_accuracies.npy")
-        self.accuracy = np.mean(self.accuracy, axis=(0, 1))
+        self.accuracy = np.load("sparse_accuracies_user5.npy")
+        self.accuracy = self.accuracy[setting][trial]
 
         self.reconfig_accs = None
         self.reconfig_weights = None
@@ -144,16 +147,15 @@ class DataGenerator:
         return self.power_levels, self.accuracy
     
     def get_reconfiguration_point(self, settings=None, selection=0, mode='linear'):
-        acc_arr, weights_arr, settings_arr = run_adaptive_model(
+        accuracy, weights, settings = run_adaptive_model(
             self.trial_lst, self.label_lst, 
             enabled_settings=[0, 1, 2, 3], sim_settings=settings, selection=selection, mode=mode
         )
-        settings_arr = np.array(settings_arr)
-        self.reconfig_accs = acc_arr
-        self.reconfig_weights = weights_arr
-        self.reconfig_settings = settings_arr
-        powers = settings_to_pow[settings_arr]
-        return np.array(acc_arr), np.sum(powers, axis=-1)
+        self.reconfig_accs = accuracy
+        self.reconfig_weights = weights
+        self.reconfig_settings = settings
+        powers = settings_to_pow[settings]
+        return np.array(accuracy), np.sum(powers, axis=-1)
 
 
 class ChannelSlider(QWidget):
@@ -595,7 +597,7 @@ class Demo(QMainWindow):
             mode = "linear"  # Default if placeholder selected
         num_drop = self.channel_drop.value()
         self._plot_accuracy(auto=True, selection=num_drop, mode=mode)
-        self.resolution_settings = 4-self.data_gen.reconfig_settings[0].copy()
+        self.resolution_settings = 4-self.data_gen.reconfig_settings.copy()
         self.committed_settings = self.resolution_settings.copy()
         for slider in self.sliders:
             slider.setValue(self.resolution_settings[slider.channel_id])
@@ -609,7 +611,7 @@ class Demo(QMainWindow):
         
         power, accuracy = self.data_gen.get_power_accuracy_curve()
         rr_acc, rr_power = self.data_gen.get_reconfiguration_point(
-            settings=[4-self.committed_settings for _ in range(5)] if not auto else None, selection=selection, mode=mode
+            settings=4-self.committed_settings if not auto else None, selection=selection, mode=mode
         )
         
         # Tradeoff curve
@@ -623,23 +625,15 @@ class Demo(QMainWindow):
         )
         self.acc_plot.addItem(fill)
         
-        # Current point scatter
-        self.acc_plot.plot(
-            rr_power, rr_acc, 
-            pen=None, symbol='o', symbolSize=6,
-            symbolBrush='#E5393580', symbolPen=None
-        )
-        
         # Mean current point
-        mean_pow, mean_acc = np.mean(rr_power), np.mean(rr_acc)
         self.acc_plot.plot(
-            [mean_pow], [mean_acc],
+            [rr_power], [rr_acc],
             pen=None, symbol='star', symbolSize=14,
             symbolBrush='#E53935', symbolPen=pg.mkPen('#B71C1C', width=1)
         )
         
         # Previous point connection
-        buffer = (mean_pow, mean_acc)
+        buffer = (rr_power, rr_acc)
         if self.previous:
             for prev_pow, prev_acc in self.previous[::-1]:
                 self.acc_plot.plot(
@@ -653,8 +647,7 @@ class Demo(QMainWindow):
                 )
                 buffer = (prev_pow, prev_acc)
             
-        
-        self.previous.append((mean_pow, mean_acc))
+        self.previous.append((rr_power, rr_acc))
         
     def _plot_importance(self):
         self.imp_plot.clear()
@@ -752,7 +745,7 @@ class Demo(QMainWindow):
 
 def main():
     trial_lst, label_lst = build_dataset(
-        filename='Playback/emg/user1/adc_raw_{trial}_21_{setting}.npz', 
+        filename='Playback/emg/user5/adc_raw_{trial}_21_{setting}.npz', 
         splits=4, raw=False
     )
     
