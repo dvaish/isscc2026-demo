@@ -1,4 +1,10 @@
 # %%
+import os
+# Optimize for Apple Silicon M2 Pro (10 cores)
+os.environ['OPENBLAS_NUM_THREADS'] = '10'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '10'
+os.environ['NUMEXPR_NUM_THREADS'] = '10'
+
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy as sp
@@ -95,7 +101,8 @@ def build_log_reg_model(x_train: np.ndarray, y_train: np.ndarray, C=10):
     x_train_s = scaler.transform(x_train)
     model = LogisticRegression(
             C=C, max_iter=int(1e5),
-            class_weight='balanced')
+            class_weight='balanced',
+            n_jobs=-1)  # Use all CPU cores for parallel computation
     model.fit(x_train_s, y_train)
     return scaler, model
 
