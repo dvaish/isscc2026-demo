@@ -71,6 +71,7 @@ def cut(dataset, raw=False):
 
 # %%
 from typing import Union, Iterable
+# from sklearnex import patch_sklearn; patch_sklearn()
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
@@ -188,94 +189,80 @@ def run_sparse_model(trials_data, trials_labels, noise_floors, noise_idx, C=10) 
         acc_arr.append(acc)
         weights_arr.append(weights)
     return acc_arr, weights_arr
+    
+def calculate_settings(curr_weights, enabled_settings, mode='linear'):
+    """
+    Given per-channel weights, apply mode transform and bin them into
+    enabled_settings indices. Returns (transformed_weights, settings).
+    """
+    if mode == 'exponential':
+        curr_weights = np.exp(curr_weights)
+    elif mode == 'quadratic':
+        curr_weights = curr_weights ** 2
+
+    num_settings = len(enabled_settings)
+    bin_size = (max(curr_weights) - min(curr_weights)) / num_settings
+    weights = (curr_weights - min(curr_weights)) / bin_size
+    thresholds = np.linspace(-0.5, num_settings + 0.5, num_settings + 2)
+
+    settings = np.zeros(weights.shape).astype(int)
+    for idx in range(num_settings + 1):
+        arg = (weights <= thresholds[idx + 1]) & (weights >= thresholds[idx])
+        settings = np.where(arg, idx, settings)
+
+    # Invert: 0 = worst, n = best -> remap to enabled_settings where 0 = best
+    settings = (num_settings - 1) - settings
+    settings = enabled_settings[settings]
+
+    return weights, settings
 
     # %%
-def run_adaptive_model(trials_data, trials_labels, enabled_settings=[0, 1, 2, 3], 
-                       train_setting=None, train_noise=0, selection=0, C=10, 
-                       sim_weights=None, sim_settings=None, mode='linear'):
+def run_adaptive_model(trials_data, trials_labels, enabled_settings=[0, 1, 2, 3],
+                       train_setting=None, train_noise=0, C=10,
+                       sim_settings=None, mode='linear'):
     enabled_settings = np.array(enabled_settings)
     if train_setting is None:
         train_setting = min(enabled_settings)
     trials_data_s = select_noise_floors(trials_data, train_setting)
-    nch, _ = trials_data_s[0].shape
-    trials_labels_s = [l[0] for l in trials_labels]
+    acc_arr, weights_arr, settings_arr, initial_weights_arr = [], [], [], []
 
-    acc_arr, weights_arr, settings_arr = [], [], []
     for i in range(5):
-        print(f"Running on trial {i} of 5")
-        y_train = np.concatenate(trials_labels[:i]+trials_labels[i+1:])
+        y_train = np.concatenate(trials_labels[:i] + trials_labels[i + 1:])
         y_test = trials_labels[i]
-        x_train = np.concatenate(trials_data_s[:i]+trials_data_s[i+1:], axis=-1).T
+        x_train = np.concatenate(trials_data_s[:i] + trials_data_s[i + 1:], axis=-1).T
         x_train = x_train + np.random.normal(0, train_noise, x_train.shape)
-        
-            
+
         if sim_settings is not None:
             settings = sim_settings[i]
-            dropped_idcs = []
+            curr_weights = None
         else:
-            if sim_weights is not None:
-                curr_weights = sim_weights[i]
-                dropped_idcs = []
-            else:
-                print("Building Model")
-                scaler, model = build_log_reg_model(x_train, y_train, C=C)
-                print("Built Model")
-                num_settings = len(enabled_settings)
-                curr_weights = get_log_reg_weights(model, x_train, y_train)
-                if mode == 'exponential':
-                    curr_weights = np.exp(curr_weights)
-                elif mode == 'quadratic':
-                    curr_weights = curr_weights**2
-                bin_size = (max(curr_weights)-min(curr_weights))/num_settings
-                weights = (curr_weights-min(curr_weights))/bin_size
-                thresholds = np.linspace(-0.5, num_settings+0.5, num_settings+2)
-                
-            # For now, just set the lowest weights to 0, don't remap the settings.
-            settings = np.zeros(weights.shape).astype(int)
-            for idx in range(num_settings+1):
-                arg = (weights<=thresholds[idx+1])&(weights>=thresholds[idx])
-                settings = np.where(arg, idx, settings)
-            # Settings goes from 0 to n where n represents "best" setting
-            # and 0 represents worst setting
-            # In the real array, noise index 0 corresponds to best, and n to worst. 
-            # ax[1].plot(settings)
+            scaler, model = build_log_reg_model(x_train, y_train, C=C)
+            curr_weights = get_log_reg_weights(model, x_train, y_train)
+            weights, settings = calculate_settings(curr_weights, enabled_settings, mode)
 
-            settings = (num_settings - 1) - settings
-            settings = enabled_settings[settings]
-            # plt.hist(settings, bins=range(0, num_settings+1), alpha=0.5)
-            print("Initial Weights")
-            print(weights)
-
-
-            # do the selection
-            # for now, just set the lowest weights to 0, don't remap the settings.
-            sorted_weight_idcs = np.argsort(weights)
-            dropped_idcs = sorted_weight_idcs[:selection]
-            
         settings_p = settings.copy()
+        active_idcs = np.where(settings_p != -1)[0]
+        num_channels = len(settings_p)
 
         trials_data_sel = select_noise_floors(trials_data, settings_p)
         x_retrain = np.concatenate(
-                trials_data_sel[:i]+trials_data_sel[i+1:], axis=-1).T
-        x_retrain[:, dropped_idcs] = 0
-        print("Retraining model with current settings")
+            trials_data_sel[:i] + trials_data_sel[i + 1:], axis=-1).T
+        x_retrain = x_retrain[:, active_idcs]
+
         scaler, model = build_log_reg_model(x_retrain, y_train, C=C)
-        print("Done Retraining model with current settings")
-        # ax[0].plot(get_log_reg_weights(model, x_train, y_train))
+
         x_test = trials_data_sel[i].T
-        x_test[:, dropped_idcs] = 0
+        x_test = x_test[:, active_idcs]
         acc_arr.append(get_test_accuracy(x_test, y_test, model, scaler))
-        weights = get_log_reg_weights(model, x_train, y_train)
-        weights_arr.append(weights)
-        settings[dropped_idcs] = -1
+
+        active_weights = get_log_reg_weights(model, x_retrain, y_train)
+        full_weights = np.zeros(num_channels)
+        full_weights[active_idcs] = active_weights
+        weights_arr.append(full_weights)
+        initial_weights_arr.append(curr_weights if (curr_weights is not None) else full_weights)
         settings_arr.append(settings)
-        print("Final Weights")
-        print(weights)
-        print("Settings")
-        print(settings)
-        # ax[1].hist(settings, bins=range(-1, 5))
-        
-    return acc_arr, weights_arr, settings_arr
+
+    return acc_arr, weights_arr, settings_arr, initial_weights_arr
 
 settings_to_pow = np.array([2.21E-06, 6.40E-07, 2.22E-07, 1.50E-07]) * 0.8
 

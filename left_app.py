@@ -31,7 +31,7 @@ class DataGenerator:
         self.label_lst = label_lst
         self.num_channels = num_channels
 
-        initial_accs, initial_weights, initial_settings = run_adaptive_model(
+        initial_accs, _, initial_settings, initial_weights = run_adaptive_model(
             self.trial_lst, self.label_lst,
             enabled_settings=[0, 1, 2, 3]
         )
@@ -53,10 +53,10 @@ class DataGenerator:
         return self.power_levels, self.accuracy
 
     def get_reconfiguration_point(self, settings=None, selection=0, mode='linear'):
-        acc_arr, weights_arr, settings_arr = run_adaptive_model(
+        acc_arr, _, settings_arr, weights_arr = run_adaptive_model(
             self.trial_lst, self.label_lst,
             enabled_settings=[0, 1, 2, 3], sim_settings=settings,
-            selection=selection, mode=mode
+            mode=mode
         )
         settings_arr = np.array(settings_arr)
         self.reconfig_accs = acc_arr
@@ -81,7 +81,7 @@ class ChannelSlider(QWidget):
         self.label = QLabel(f"{channel_id:02d}")
         self.label.setFixedWidth(22)
         self.label.setFont(QFont("Menlo", 9))
-        self.label.setStyleSheet("color: #E53935;")
+        self.label.setStyleSheet("color: #FFFFFF;")
         layout.addWidget(self.label)
 
         self.slider = QSlider(Qt.Horizontal)
@@ -112,6 +112,7 @@ class ChannelSlider(QWidget):
         self.value_label.setFixedWidth(12)
         self.value_label.setFont(QFont("Menlo", 9, QFont.Bold))
         self.value_label.setAlignment(Qt.AlignCenter)
+        self.value_label.setStyleSheet(f"color: #E53935; font-weight: bold;")
         layout.addWidget(self.value_label)
 
     def _on_change(self, value):
@@ -324,7 +325,6 @@ class LeftApp(QMainWindow):
         for slider in self.sliders:
             slider.setValue(self.resolution_settings[slider.channel_id])
         self._plot_importance()
-        print("Updated Importance")
         self._flash_status("✓ Auto Applied")
 
     def _flash_status(self, msg):
@@ -376,7 +376,6 @@ class LeftApp(QMainWindow):
     def _plot_importance(self):
         self.imp_plot.clear()
         importances = self.data_gen.get_channel_importances()
-        print(importances)
         channels = np.arange(self.num_channels)
         colors = {0: '#9E9E9E', 1: '#E53935', 2: '#FB8C00', 3: '#C0CA33', 4: '#43A047'}
         brushes = [pg.mkBrush(colors[r]) for r in self.resolution_settings]
