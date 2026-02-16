@@ -193,23 +193,24 @@ def run_sparse_model(trials_data, trials_labels, noise_floors, noise_idx, C=10) 
 def run_adaptive_model(trials_data, trials_labels, 
                        selected_idcs=np.ones(64).astype(bool), C=10, 
                        sim_settings=None, trial=0):
-    enabled_settings = np.array([0, 1, 2, 3])
-    train_setting = min(enabled_settings)
-    trials_data_s = select_noise_floors(trials_data, train_setting)
-
-    acc_arr, weights_arr, settings_arr = [], [], []
-    i = trial
-    print(f"Running on trial {i} of 5")
-    y_train = np.concatenate(trials_labels[:i]+trials_labels[i+1:])
-    y_test = trials_labels[i]
-    x_train = np.concatenate(trials_data_s[:i]+trials_data_s[i+1:], axis=-1).T
-    x_train = x_train[:, selected_idcs]
     
-        
+    i = trial
+
+    y_train = np.concatenate(trials_labels[i+1:]) # TODO: Fix
+    y_test = trials_labels[i]
+
     if sim_settings is not None:
-        settings = sim_settings[i]
-        dropped_idcs = []
+        settings = sim_settings
     else:
+        enabled_settings = np.array([0, 1, 2, 3])
+        train_setting = min(enabled_settings)
+        trials_data_s = select_noise_floors(trials_data, train_setting)
+
+        acc_arr, weights_arr, settings_arr = [], [], []
+        print(f"Running on trial {i} of 5")
+        x_train = np.concatenate(trials_data_s[:i]+trials_data_s[i+1:], axis=-1).T
+        x_train = x_train[:, selected_idcs]
+
         print("Building Model")
         scaler, model = build_log_reg_model(x_train, y_train, C=C)
         print("Built Model")
@@ -234,24 +235,23 @@ def run_adaptive_model(trials_data, trials_labels,
             
     settings_p = settings.copy()
 
+    trials_data = trials_data[:, :, selected_idcs, :]
     trials_data_sel = select_noise_floors(trials_data, settings_p)
     x_retrain = np.concatenate(
             trials_data_sel[:i]+trials_data_sel[i+1:], axis=-1).T
-    x_retrain = x_retrain[:, selected_idcs]
+    print(f"x_train shape: {x_retrain.shape}")
     print("Retraining model with current settings")
     scaler, model = build_log_reg_model(x_retrain, y_train, C=C)
     print("Done Retraining model with current settings")
     # ax[0].plot(get_log_reg_weights(model, x_train, y_train))
     x_test = trials_data_sel[i].T
-    x_test = x_test[:, selected_idcs]
-    acc_arr.append(get_test_accuracy(x_test, y_test, model, scaler))
-    weights = get_log_reg_weights(model, x_train, y_train)
-    weights_arr.append(weights)
-    settings_arr.append(settings)
+    acc_arr = [get_test_accuracy(x_test, y_test, model, scaler)]
+    weights_arr = [get_log_reg_weights(model, x_retrain, y_train)]
+    settings_arr = [settings]
     print("Final Weights")
-    print(weights)
+    print(weights_arr)
     print("Settings")
-    print(settings)
+    print(settings_arr)
     # ax[1].hist(settings, bins=range(-1, 5))
 
     coefs_arr = model.coef_ # (n_classes, n_features)

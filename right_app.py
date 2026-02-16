@@ -23,7 +23,7 @@ pg.setConfigOptions(antialias=True, background='w', foreground='k')
 # Socket settings
 STREAMER_HOST = 'localhost'
 STREAMER_PORT = 5555
-NUM_CHANNELS = 64
+NUM_CHANNELS = 16
 DISPLAY_CHANNELS = 16
 NUM_CLASSES = 12
 CHUNK_SIZE = 33
@@ -34,7 +34,7 @@ MAV_SAMPLES = DISPLAY_SAMPLES // MAV_WINDOW
 
 class SocketReceiver(QThread):
     """Background thread for receiving data from streamer and sending settings."""
-    data_received = pyqtSignal(np.ndarray)
+    data_received = pyqtSignal(object, object, object)
     connected = pyqtSignal(bool)
     disconnected = pyqtSignal()
 
@@ -79,12 +79,24 @@ class SocketReceiver(QThread):
             try:
                 header = self._recv_exact(4)
                 if header == b'DATA':
-                    size_data = self._recv_exact(4)
-                    size = struct.unpack('I', size_data)[0]
-                    data_bytes = self._recv_exact(size)
+                    dims = self._recv_exact(8)
+                    n_channels, n_samples = struct.unpack('<II', dims)
+                    data_bytes = self._recv_exact(n_channels * n_samples * 4)
                     data = np.frombuffer(data_bytes, dtype=np.float32)
-                    data = data.reshape(DISPLAY_CHANNELS, -1)
-                    self.data_received.emit(data)
+                    data = data.reshape(n_channels, n_samples)
+                    self.data_received.emit(data, None, None)
+                elif header == b'LABL':
+                    size_data = self._recv_exact(4)
+                    length = struct.unpack('<I', size_data)[0]
+                    labels_bytes = self._recv_exact(length * 4) if length > 0 else b''
+                    labels = np.frombuffer(labels_bytes, dtype=np.int32) if length > 0 else np.array([], dtype=np.int32)
+                    self.data_received.emit(None, labels, None)
+                elif header == b'COEF':
+                    dims = self._recv_exact(8)
+                    n_classes, n_channels = struct.unpack('<II', dims)
+                    data_bytes = self._recv_exact(n_classes * n_channels * 4) if n_classes * n_channels > 0 else b''
+                    coefs = np.frombuffer(data_bytes, dtype=np.float32).reshape(n_classes, n_channels) if n_classes * n_channels > 0 else np.zeros((0, 0), dtype=np.float32)
+                    self.data_received.emit(None, None, coefs)
             except Exception as e:
                 raise e
 
@@ -216,6 +228,8 @@ class RightApp(QMainWindow):
         self.logits_buffer = np.zeros((NUM_CLASSES, MAV_SAMPLES))
         self.mav_accumulator = np.zeros((DISPLAY_CHANNELS,))
         self.mav_count = 0
+        self.labels = np.array([], dtype=np.int32)
+        self.coefs = np.zeros((0, 0), dtype=np.float32)
 
         self.sliders = []
 
@@ -403,7 +417,13 @@ class RightApp(QMainWindow):
 
     # ── Live data handlers ────────────────────────────────────────────────────
 
-    def _on_data_received(self, data):
+    def _on_data_received(self, data, labels, coefs):
+        if labels is not None:
+            self.labels = labels
+        if coefs is not None:
+            self.coefs = coefs
+        if data is None:
+            return
         num_new = data.shape[1]
 
         # Roll voltage buffer and insert new samples
@@ -422,7 +442,7 @@ class RightApp(QMainWindow):
                 self.mav_buffer[:, -1] = mav_value
 
                 self.logits_buffer = np.roll(self.logits_buffer, -1, axis=1)
-                self.logits_buffer[:, -1] = self.coefs @ mav_value  # Replace with model output
+                self.logits_buffer[:, -1] = self._compute_logits(mav_value)
 
                 self.mav_accumulator = np.zeros((DISPLAY_CHANNELS,))
                 self.mav_count = 0
@@ -439,6 +459,26 @@ class RightApp(QMainWindow):
 
         for i in range(NUM_CLASSES):
             self.logits_curves[i].setData(t_mav, self.logits_buffer[i])
+
+    def _compute_logits(self, mav_value):
+        if self.coefs is None or self.coefs.size == 0:
+            return np.zeros((NUM_CLASSES,), dtype=np.float32)
+        if self.coefs.ndim != 2:
+            return np.zeros((NUM_CLASSES,), dtype=np.float32)
+        n_classes, n_channels = self.coefs.shape
+        if n_channels == mav_value.shape[0]:
+            logits = self.coefs @ mav_value
+        elif n_channels > mav_value.shape[0]:
+            logits = self.coefs[:, :mav_value.shape[0]] @ mav_value
+        else:
+            padded = np.zeros((n_channels,), dtype=np.float32)
+            padded[:mav_value.shape[0]] = mav_value
+            logits = self.coefs @ padded
+        if logits.shape[0] < NUM_CLASSES:
+            out = np.zeros((NUM_CLASSES,), dtype=np.float32)
+            out[:logits.shape[0]] = logits
+            return out
+        return logits[:NUM_CLASSES]
 
     # ── Socket status ─────────────────────────────────────────────────────────
 

@@ -28,6 +28,7 @@ from train_hardware import build_dataset, build_dataset, run_adaptive_model
 HOST = 'localhost'
 PORT = 5555
 NUM_CHANNELS = 16
+NUM_CLASSES = 12
 SPLIT = 0
 CHUNK_SIZE = 33  # Samples per chunk (~33ms at 1kHz, sent at 30Hz)
 SAMPLE_RATE = 1000  # Original sample rate in Hz
@@ -49,10 +50,14 @@ class DataStreamer:
         self.write_position = 0  # Current write position to chip
         self.read_position = 0  # Current read position in data
         self.brd = None
+        self.labels = np.array([], dtype=np.int32)
+        self.coefs = np.zeros((NUM_CLASSES, NUM_CHANNELS), dtype=np.float32)
+        self.pending_meta = True
 
         if self.source == 'static':
             # Preload all settings for the trial
             self._load_all_settings()
+            self._init_default_labels()
         elif self.source == 'chip':
             self._setup_dataset()
             self._setup_chip()
@@ -66,6 +71,8 @@ class DataStreamer:
             filename=f'playback/emg/user{user}/adc_raw_{trial}_21_{3}.npz',
             splits=4, raw=False
         )
+        self.trial_lst = np.array(self.trial_lst)
+        self.label_lst = np.array(self.label_lst)
 
         acc_arr, weights_arr, settings_arr, coefs_arr = run_adaptive_model(
             trials_data=self.trial_lst, 
@@ -78,13 +85,19 @@ class DataStreamer:
         self.selected_idcs = np.zeros(64, dtype=bool)
         self.selected_idcs[np.argsort(weights_arr[-1])[-NUM_CHANNELS:]] = True
         self.coefs_arr = coefs_arr
+        self.coefs = np.array(coefs_arr, dtype=np.float32) if coefs_arr is not None else np.zeros((0, 0), dtype=np.float32)
+        if len(self.label_lst) > self.trial:
+            self.labels = np.array(self.label_lst[self.trial], dtype=np.int32)
+        self.pending_meta = True
         
         data_file = f"datasets/emg/user{user}.npy" # TODO: Get the path to the correct data file
         dataset = np.load(data_file)
         ntrials, nsplits, nch, npts = dataset.shape
 
+        dataset = dataset[trial]
+        dataset = dataset.reshape(-1, npts)  # Shape (npts, NUM_CHANNELS)
         input_data_arr = np.zeros((npts, NUM_CHANNELS), dtype=int)
-        input_data_arr = dataset[trial, split, self.selected_idcs, :].T
+        input_data_arr = dataset[self.selected_idcs, :].T
         input_data_byte_arr = bytearray(
                 input_data_arr.astype(dtype='<u4', order='C').tobytes())
         
@@ -179,6 +192,34 @@ class DataStreamer:
         
         self.data_length = min_length
         print(f"Total samples per channel: {self.data_length}")
+
+    def _init_default_labels(self):
+        """Initialize default labels if not provided by dataset."""
+        if self.labels.size == 0:
+            # 11 classes x 80 windows per class (matches build_dataset)
+            labels = np.array(sum([[i] * 80 for i in range(11)], []), dtype=np.int32)
+            self.labels = labels
+            self.pending_meta = True
+
+    def _normalize_coefs(self, coefs):
+        """Ensure coef matrix has shape (NUM_CLASSES, NUM_CHANNELS)."""
+        if coefs is None:
+            return np.zeros((NUM_CLASSES, NUM_CHANNELS), dtype=np.float32)
+        coefs = np.array(coefs, dtype=np.float32)
+        if coefs.ndim != 2:
+            return np.zeros((NUM_CLASSES, NUM_CHANNELS), dtype=np.float32)
+        n_classes, n_channels = coefs.shape
+        if n_channels < NUM_CHANNELS:
+            pad = np.zeros((n_classes, NUM_CHANNELS - n_channels), dtype=np.float32)
+            coefs = np.concatenate([coefs, pad], axis=1)
+        elif n_channels > NUM_CHANNELS:
+            coefs = coefs[:, :NUM_CHANNELS]
+        if n_classes < NUM_CLASSES:
+            pad = np.zeros((NUM_CLASSES - n_classes, NUM_CHANNELS), dtype=np.float32)
+            coefs = np.concatenate([coefs, pad], axis=0)
+        elif n_classes > NUM_CLASSES:
+            coefs = coefs[:NUM_CLASSES, :]
+        return coefs
         
     def get_chunk(self):
         """Get next chunk of data based on current per-channel settings."""
@@ -228,14 +269,17 @@ class DataStreamer:
     def update_settings(self, settings):
         """Update per-channel resolution settings."""
         self.current_settings = np.array(settings, dtype=np.int32)
+        print(self.current_settings)
         setup_adc_settings(self.brd, settings[SPLIT*NUM_CHANNELS:(SPLIT+1)*NUM_CHANNELS])  # Assuming all channels use the same setting for simplicity
-        acc_arr, weights_arr, settings_arr = run_adaptive_model(
-            trials_data=self.trial_lst,  # Not used in this context
-            trials_labels=self.label_lst,  # Not used in this context
-            selected_idcs=self.selected_idcs,  # Not used in this context
-            sim_settings=settings,  # Pass current settings to the model
+        acc_arr, weights_arr, settings_arr, coefs_arr = run_adaptive_model(
+            trials_data=self.trial_lst,
+            trials_labels=self.label_lst,
+            selected_idcs=self.selected_idcs,
+            sim_settings=4-settings,
             trial=self.trial
         )
+        self.coefs = np.array(coefs_arr, dtype=np.float32) if coefs_arr is not None else np.zeros((0, 0), dtype=np.float32)
+        self.pending_meta = True
 
     def run_server(self):
         """Run the socket server."""
@@ -291,13 +335,18 @@ class DataStreamer:
                 chunk, updated = self.get_chunk()
 
                 if updated:
+                    if self.pending_meta:
+                        self._send_labels(conn)
+                        self._send_coefs(conn)
+                        self.pending_meta = False
+
                     # Send header + data
                     header = b'DATA'
                     data_bytes = chunk.astype(np.float32).tobytes()
-                    size = struct.pack('I', len(data_bytes))
+                    dims = struct.pack('<II', chunk.shape[0], chunk.shape[1])
 
                     try:
-                        conn.sendall(header + size + data_bytes)
+                        conn.sendall(header + dims + data_bytes)
                     except BlockingIOError:
                         pass
 
@@ -307,6 +356,30 @@ class DataStreamer:
                     last_send = now
             
             time.sleep(0.005)  # Small sleep to prevent busy loop
+
+    def _send_labels(self, conn):
+        """Send labels packet to the client."""
+        labels = np.array(self.labels, dtype=np.int32).reshape(-1)
+        header = b'LABL'
+        meta = struct.pack('<I', labels.size)
+        payload = labels.tobytes()
+        try:
+            conn.sendall(header + meta + payload)
+        except BlockingIOError:
+            pass
+
+    def _send_coefs(self, conn):
+        """Send coef matrix packet to the client."""
+        coefs = np.array(self.coefs, dtype=np.float32)
+        if coefs.ndim != 2:
+            coefs = np.zeros((0, 0), dtype=np.float32)
+        header = b'COEF'
+        meta = struct.pack('<II', coefs.shape[0], coefs.shape[1])
+        payload = coefs.tobytes()
+        try:
+            conn.sendall(header + meta + payload)
+        except BlockingIOError:
+            pass
 
 
 def main():
