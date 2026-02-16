@@ -11,12 +11,13 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 import pyqtgraph as pg
+import scipy.signal as signal
 
 pg.setConfigOptions(antialias=True, background='w', foreground='k')
 
 # Configuration
 FFT_POINTS = 8192  # N-point FFT (user configurable)
-DATA_FILE = 'Playback/sine/adc_raw_4_0.npy'
+DATA_FILE = 'adc_raw_4_0.npy'
 NUM_CHANNELS = 16
 SAMPLING_RATE = 1000  # Hz (adjust based on your system)
 
@@ -60,28 +61,10 @@ def load_and_process_data(filename, button_id, fft_points=FFT_POINTS):
     # Next 16 plots: FFT for each channel
     for ch in range(NUM_CHANNELS):
         ch_signal = channel_data[ch]
-        
-        # Use fft_points samples for FFT calculation
-        fft_samples = min(fft_points, len(ch_signal))
-        signal_segment = ch_signal[:fft_samples].astype(float)
-        
-        # Remove DC component
-        signal_segment = signal_segment - np.mean(signal_segment)
-        
-        # Apply Hanning window
-        window = np.hanning(len(signal_segment))
-        windowed_signal = signal_segment * window
-        
-        # Compute FFT
-        fft_result = np.fft.fft(windowed_signal, n=fft_points)
-        fft_magnitude = np.abs(fft_result[:fft_points//2])  # Only positive frequencies
-        
-        # Convert to dB scale
-        fft_db = 20 * np.log10(fft_magnitude + 1e-10)  # Add small value to avoid log(0)
-        
-        # Frequency axis in Hz
-        freq_x = np.fft.fftfreq(fft_points, 1/SAMPLING_RATE)[:fft_points//2]
-        plot_data.append((freq_x, fft_db))
+        freq, spec = signal.welch(ch_signal[-fft_points:], fs=SAMPLING_RATE,
+                                  nperseg=fft_points,
+                                  window='blackmanharris', scaling='density')
+        plot_data.append((freq, 10*np.log10(spec)))
     
     return plot_data
 
@@ -196,13 +179,13 @@ class GridGUI(QMainWindow):
                 plot_idx = row * 8 + col
                 
                 # Label left 16 plots as CH0-CH15, right 16 as FFT0-FFT15
-                if col < 4:
+                if row < 2:
                     # Left half: CH plots
-                    ch_idx = row * 4 + col
+                    ch_idx = row * 8 + col
                     plot_title = f'CH{ch_idx}'
                 else:
                     # Right half: FFT plots
-                    fft_idx = row * 4 + (col - 4)
+                    fft_idx = (row-2) * 8 + col 
                     plot_title = f'FFT{fft_idx}'
                 
                 # Create plot widget
