@@ -55,7 +55,8 @@ def setup_adc_settings(brd: Any, setting: List[int]):
         val = 0
         for j in range(8):
             val = (val | (setting[i*8+j] << (j*2)))
-        brd.write_register(29+i, val)
+            val = int(val)
+        brd.write_register(29+i, int(val))
 
 def write_model_params(brd):
     # SOUL model parameters

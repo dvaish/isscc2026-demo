@@ -394,11 +394,11 @@ class LeftApp(QMainWindow):
         event.accept()
 
 
-def main():
+def main(user=0, trial=0):
     import traceback
     try:
         trial_lst, label_lst = build_dataset(
-            filename='Playback/emg/user1/adc_raw_{trial}_21_{setting}.npz',
+            filename=f'playback/emg/user{user}/adc_raw_{trial}_21_{3}.npz',
             splits=4, raw=False
         )
 
@@ -411,7 +411,6 @@ def main():
         palette.setColor(QPalette.AlternateBase, QColor(245, 245, 245))
         app.setPalette(palette)
         
-        breakpoint()
         window = LeftApp(trial_lst, label_lst)
         window.show()
         sys.exit(app.exec_())
@@ -421,4 +420,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    main(user=5, trial=0)

@@ -22,6 +22,8 @@ from testboard.setup import setup_adc_test
 from tqdm import tqdm
 import pickle
 
+from train_hardware import build_dataset, build_dataset, run_adaptive_model
+
 # Constants
 HOST = 'localhost'
 PORT = 5555
@@ -58,15 +60,31 @@ class DataStreamer:
             raise ValueError('source must be "static" or "chip"')
         
         
-    def _setup_dataset(self, trial:int=0, split:int=0, n_samples:int=256):
+    def _setup_dataset(self, trial:int=0, split:int=0, n_samples:int=256, user:int=5):
+
+        self.trial_lst, self.label_lst = build_dataset(
+            filename=f'playback/emg/user{user}/adc_raw_{trial}_21_{3}.npz',
+            splits=4, raw=False
+        )
+
+        acc_arr, weights_arr, settings_arr, coefs_arr = run_adaptive_model(
+            trials_data=self.trial_lst, 
+            trials_labels=self.label_lst, 
+            selected_idcs=np.ones(64).astype(bool), 
+            sim_settings=[3]*64, 
+            trial=trial
+        )
+        print(f"Adaptive model run complete. Accuracy: {acc_arr[-1]:.4f}, Settings: {settings_arr[-1]}, Weights: {weights_arr[-1]}")
+        self.selected_idcs = np.zeros(64, dtype=bool)
+        self.selected_idcs[np.argsort(weights_arr[-1])[-NUM_CHANNELS:]] = True
+        self.coefs_arr = coefs_arr
         
-        data_file = "datasets/emg/user5.npy" # TODO: Get the path to the correct data file
+        data_file = f"datasets/emg/user{user}.npy" # TODO: Get the path to the correct data file
         dataset = np.load(data_file)
         ntrials, nsplits, nch, npts = dataset.shape
-        trial_lst = []
 
-        input_data_arr = np.zeros((npts, 16), dtype=int)
-        input_data_arr[:, :nch] = dataset[trial, split, :, :].T
+        input_data_arr = np.zeros((npts, NUM_CHANNELS), dtype=int)
+        input_data_arr = dataset[trial, split, self.selected_idcs, :].T
         input_data_byte_arr = bytearray(
                 input_data_arr.astype(dtype='<u4', order='C').tobytes())
         
@@ -178,7 +196,6 @@ class DataStreamer:
                     self.read_position += 1
                     data = process_bytearrs([readout])
                     data_proc = post_process_data(data, self.src)
-                    print(data_proc)
                     return data_proc, True
                 else:
                     return None, False
@@ -208,11 +225,18 @@ class DataStreamer:
             self.read_position = end_pos % self.data_length
             return chunk, True
     
-    def update_settings(self, settings, nch=NUM_CHANNELS):
+    def update_settings(self, settings):
         """Update per-channel resolution settings."""
         self.current_settings = np.array(settings, dtype=np.int32)
-        setup_adc_settings(self.brd, self.current_settings[:nch])  # Assuming all channels use the same setting for simplicity
-        
+        setup_adc_settings(self.brd, settings[SPLIT*NUM_CHANNELS:(SPLIT+1)*NUM_CHANNELS])  # Assuming all channels use the same setting for simplicity
+        acc_arr, weights_arr, settings_arr = run_adaptive_model(
+            trials_data=self.trial_lst,  # Not used in this context
+            trials_labels=self.label_lst,  # Not used in this context
+            selected_idcs=self.selected_idcs,  # Not used in this context
+            sim_settings=settings,  # Pass current settings to the model
+            trial=self.trial
+        )
+
     def run_server(self):
         """Run the socket server."""
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

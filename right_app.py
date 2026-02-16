@@ -128,7 +128,7 @@ class ChannelSlider(QWidget):
         layout.addWidget(self.label)
 
         self.slider = QSlider(Qt.Horizontal)
-        self.slider.setRange(0, 4)
+        self.slider.setRange(1, 4)
         self.slider.setValue(init)
         self.slider.setFixedWidth(60)
         self.slider.setStyleSheet("""
@@ -159,7 +159,7 @@ class ChannelSlider(QWidget):
 
     def _on_change(self, value):
         self.value_label.setText(str(value))
-        colors = {0: '#9E9E9E', 1: '#E53935', 2: '#FB8C00', 3: '#C0CA33', 4: '#43A047'}
+        colors = {1: '#E53935', 2: '#FB8C00', 3: '#C0CA33', 4: '#43A047'}
         self.value_label.setStyleSheet(f"color: {colors[value]}; font-weight: bold;")
         self.callback(self.channel_id, value)
 
@@ -422,7 +422,7 @@ class RightApp(QMainWindow):
                 self.mav_buffer[:, -1] = mav_value
 
                 self.logits_buffer = np.roll(self.logits_buffer, -1, axis=1)
-                self.logits_buffer[:, -1] = np.zeros(NUM_CLASSES)  # Replace with model output
+                self.logits_buffer[:, -1] = self.coefs @ mav_value  # Replace with model output
 
                 self.mav_accumulator = np.zeros((DISPLAY_CHANNELS,))
                 self.mav_count = 0
