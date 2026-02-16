@@ -16,7 +16,7 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QPalette, QColor
 import pyqtgraph as pg
 
-from train import settings_to_pow, build_dataset, run_adaptive_model
+from train import settings_to_pow, build_dataset, run_adaptive_model, calculate_settings
 
 pg.setConfigOptions(antialias=True, background='w', foreground='k')
 
@@ -54,7 +54,8 @@ class DataGenerator:
             enabled_settings=[0, 1, 2, 3], sim_settings=settings,
             mode=mode
         )
-        settings_arr = np.array(settings_arr)
+        settings_arr = np.array([x[np.where(x >= 0)] for x in settings_arr])
+        # settings_arr = np.array(settings_arr)
         powers = settings_to_pow[settings_arr]
         return np.array(acc_arr), np.sum(powers, axis=-1)
 
@@ -313,9 +314,12 @@ class LeftApp(QMainWindow):
             mode = "linear"
         num_drop = self.channel_drop.value()
         # self._plot_accuracy(auto=True, selection=num_drop, mode=mode)
-        self.resolution_settings = 4 - self.data_gen.initial_settings.copy()
-        self.committed_settings = self.resolution_settings.copy()
         importances = self.data_gen.get_channel_importances()
+        _, settings = calculate_settings(
+                importances, 
+                enabled_settings=np.array([0, 1, 2, 3]), mode=mode)
+        self.resolution_settings = 4 - settings
+        self.committed_settings = self.resolution_settings.copy()
         for slider in self.sliders:
             slider.setValue(self.resolution_settings[slider.channel_id])
         self._plot_importance()
@@ -329,23 +333,26 @@ class LeftApp(QMainWindow):
     def _plot_accuracy(self, auto=False, selection=0, mode='linear'):
         self.acc_plot.clear()
         power, accuracy = self.data_gen.get_power_accuracy_curve()
+        new_settings = np.array([4-x for x in self.committed_settings])
+        new_settings[np.where(new_settings==4)] = -1
         rr_acc, rr_power = self.data_gen.get_reconfiguration_point(
-            settings=[4 - self.committed_settings for _ in range(5)] if not auto else None,
+            settings=[new_settings for _ in range(5)] if not auto else None,
             selection=selection, mode=mode
         )
 
         self.acc_plot.plot(power, accuracy, pen=pg.mkPen('#2196F3', width=2))
-        fill = pg.FillBetweenItem(
-            pg.PlotDataItem(power, accuracy),
-            pg.PlotDataItem(power, np.full_like(accuracy, 0.5)),
-            brush=pg.mkBrush('#2196F320')
-        )
-        self.acc_plot.addItem(fill)
-        self.acc_plot.plot(
-            rr_power, rr_acc,
-            pen=None, symbol='o', symbolSize=6,
-            symbolBrush='#E5393580', symbolPen=None
-        )
+        
+        # fill = pg.FillBetweenItem(
+        #     pg.PlotDataItem(power, accuracy),
+        #     pg.PlotDataItem(power, np.full_like(accuracy, 0.5)),
+        #     brush=pg.mkBrush('#2196F320')
+        # )
+        # self.acc_plot.addItem(fill)
+        # self.acc_plot.plot(
+        #     rr_power, rr_acc,
+        #     pen=None, symbol='o', symbolSize=6,
+        #     symbolBrush='#E5393580', symbolPen=None
+        # )
         mean_pow, mean_acc = np.mean(rr_power), np.mean(rr_acc)
         self.acc_plot.plot(
             [mean_pow], [mean_acc],
@@ -366,6 +373,8 @@ class LeftApp(QMainWindow):
                 )
                 buffer = (prev_pow, prev_acc)
         self.previous.append((mean_pow, mean_acc))
+        self.acc_plot.setXRange(np.log10(min(power)), np.log10(max(power)), padding=0)
+        self.acc_plot.setYRange(80, 100)
 
     def _plot_importance(self):
         self.imp_plot.clear()
