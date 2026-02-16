@@ -200,7 +200,7 @@ def calculate_settings(curr_weights, enabled_settings, mode='linear'):
     elif mode == 'quadratic':
         curr_weights = curr_weights ** 2
 
-    num_settings = len(enabled_settings)
+    num_settings = len(enabled_settings) - 1
     bin_size = (max(curr_weights) - min(curr_weights)) / num_settings
     weights = (curr_weights - min(curr_weights)) / bin_size
     thresholds = np.linspace(-0.5, num_settings + 0.5, num_settings + 2)
@@ -211,7 +211,7 @@ def calculate_settings(curr_weights, enabled_settings, mode='linear'):
         settings = np.where(arg, idx, settings)
 
     # Invert: 0 = worst, n = best -> remap to enabled_settings where 0 = best
-    settings = (num_settings - 1) - settings
+    settings = num_settings - settings
     settings = enabled_settings[settings]
 
     return weights, settings

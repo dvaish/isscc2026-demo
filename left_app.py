@@ -36,15 +36,11 @@ class DataGenerator:
             enabled_settings=[0, 1, 2, 3]
         )
         self.channel_importances = initial_weights[0]
-        self.initial_settings = initial_settings
+        self.initial_settings = initial_settings[0]
 
         self.power_levels = settings_to_pow[0] * (1 + np.arange(self.num_channels))[::-1]
         self.accuracy = np.load("sparse_accuracies.npy")
         self.accuracy = np.mean(self.accuracy, axis=(0, 1))
-
-        self.reconfig_accs = None
-        self.reconfig_weights = None
-        self.reconfig_settings = None
 
     def get_channel_importances(self):
         return self.channel_importances
@@ -59,9 +55,6 @@ class DataGenerator:
             mode=mode
         )
         settings_arr = np.array(settings_arr)
-        self.reconfig_accs = acc_arr
-        self.reconfig_weights = weights_arr
-        self.reconfig_settings = settings_arr
         powers = settings_to_pow[settings_arr]
         return np.array(acc_arr), np.sum(powers, axis=-1)
 
@@ -320,8 +313,9 @@ class LeftApp(QMainWindow):
             mode = "linear"
         num_drop = self.channel_drop.value()
         # self._plot_accuracy(auto=True, selection=num_drop, mode=mode)
-        self.resolution_settings = 4 - self.data_gen.initial_settings[0].copy()
+        self.resolution_settings = 4 - self.data_gen.initial_settings.copy()
         self.committed_settings = self.resolution_settings.copy()
+        importances = self.data_gen.get_channel_importances()
         for slider in self.sliders:
             slider.setValue(self.resolution_settings[slider.channel_id])
         self._plot_importance()
