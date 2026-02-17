@@ -4,16 +4,17 @@ import matplotlib.pyplot as plt
 import scipy as sp
 from tqdm import tqdm
 from scipy import signal
-
+from scipy.special import softmax
+import joblib
 
 # %%
 def get_feature(data):
     nch, ndata = data.shape
-    filter = signal.butter(2, 1, btype='high', output='sos', fs=1000)
-    data = signal.sosfilt(filter, data, axis=-1, zi=None)
+    # filter = signal.butter(2, 1, btype='high', output='sos', fs=1000)
+    # data = signal.sosfilt(filter, data, axis=-1, zi=None)
     data_r = data.reshape(nch, ndata//50, 50)
-    means = np.mean(data_r, axis=-1, keepdims=True)
-    return np.sum(abs(data_r-means), axis=-1)/50
+    # means = np.mean(data_r, axis=-1, keepdims=True)
+    return np.sum(abs(data_r), axis=-1)/50
 
 # %%
 def load_dataset(filename:str, splits:int=8, raw=False):
@@ -235,6 +236,8 @@ def run_adaptive_model(trials_data, trials_labels,
             
     settings_p = settings.copy()
 
+    print("Selected indices:", np.argwhere(selected_idcs).flatten())
+
     trials_data = trials_data[:, :, selected_idcs, :]
     trials_data_sel = select_noise_floors(trials_data, settings_p)
     x_retrain = np.concatenate(
@@ -248,15 +251,30 @@ def run_adaptive_model(trials_data, trials_labels,
     acc_arr = [get_test_accuracy(x_test, y_test, model, scaler)]
     weights_arr = [get_log_reg_weights(model, x_retrain, y_train)]
     settings_arr = [settings]
-    print("Final Weights")
-    print(weights_arr)
-    print("Settings")
-    print(settings_arr)
+    print("Test Accuracy")
+    print(acc_arr)
     # ax[1].hist(settings, bins=range(-1, 5))
 
     coefs_arr = model.coef_ # (n_classes, n_features)
-        
-    return acc_arr, weights_arr, settings_arr, coefs_arr
+    intercept_arr = model.intercept_ # (n_classes,)
+    means_arr = scaler.mean_ # (n_features,)
+    stds_arr = scaler.scale_ # (n_features,)
+
+
+    logits_unnormalized = (coefs_arr @ scaler.transform(x_test).T + intercept_arr[:, None])
+    logits = softmax(logits_unnormalized, axis=0)
+    fig, axs = plt.subplots(11, figsize=(12, 5))
+    for i, logit in enumerate(logits):
+        axs[i].plot(logit)
+    print(f"Save figure with {selected_idcs}")
+    np.save("simulated_logits.npy", logits_unnormalized)
+    np.save("simulated_mav.npy", x_test)
+    plt.savefig("logits.png")
+
+    joblib.dump(model, 'model.joblib')
+    joblib.dump(scaler, 'scaler.joblib')
+
+    return acc_arr, weights_arr, settings_arr, coefs_arr, intercept_arr, means_arr, stds_arr
 
 settings_to_pow = np.array([2.21E-06, 6.40E-07, 2.22E-07, 1.50E-07]) * 0.8
 

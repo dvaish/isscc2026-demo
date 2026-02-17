@@ -56,6 +56,7 @@ def setup_adc_settings(brd: Any, setting: List[int]):
         for j in range(8):
             val = (val | (setting[i*8+j] << (j*2)))
             val = int(val)
+        print(f"{val:016b}")
         brd.write_register(29+i, int(val))
 
 def write_model_params(brd):

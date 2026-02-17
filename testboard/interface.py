@@ -141,8 +141,8 @@ class AURATestBoard:
         time.sleep(0.1)
         error_wire, read_wire = self._update_readback()
         command_num, opcode_out, error_code = self._parse_error_wire(error_wire)
-        if opcode_out != self.opcodes[opcode] or error_code != 0:
-            print(f"[{command_num}], Error Code: {0}".format(error_code))
+        if (opcode_out != self.opcodes[opcode]) or (error_code != 0):
+            print(f"[{command_num}], Error Code: {error_code}")
             raise ValueError(f"Failed to send command OPCODE={opcode}, DATA={data}, ADDR={addr}, OPCODE_OUT={opcode_out}, EXPECTED={self.opcodes[opcode]}")
         return read_wire
 

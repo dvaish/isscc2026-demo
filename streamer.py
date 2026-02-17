@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Data Streamer - Streams EMG data over a socket for the demo GUI.
-Reads from Playback/emg/user1/adc_raw_[trial]_21_[setting].npz files
+Reads from Playback/emg/user5/adc_raw_[trial]_21_[setting].npz files
 or from a dynamically updated circular buffer file.
 """
 
@@ -21,6 +21,7 @@ from testboard.adc import *
 from testboard.setup import setup_adc_test
 from tqdm import tqdm
 import pickle
+import os
 
 from train_hardware import build_dataset, build_dataset, run_adaptive_model
 
@@ -32,7 +33,8 @@ NUM_CLASSES = 12
 SPLIT = 0
 CHUNK_SIZE = 33  # Samples per chunk (~33ms at 1kHz, sent at 30Hz)
 SAMPLE_RATE = 1000  # Original sample rate in Hz
-STREAM_RATE = 30  # How often we send chunks (Hz)
+STREAM_RATE = 33  # How often we send chunks (Hz)
+MAV_WINDOW = 50  # 50ms MAV window
 
 BUFFER_MAGIC = b'EMGB'
 BUFFER_VERSION = 1
@@ -41,25 +43,29 @@ BUFFER_HEADER_SIZE = 32  # Bytes (padded)
 
 
 class DataStreamer:
-    def __init__(self, trial=0, data_dir='Playback/emg/user1', source='static', buffer_file=None):
+    def __init__(self, trial=0, data_dir='playback/emg/user', source='static', user:int=5):
         self.trial = trial
-        self.data_dir = data_dir
+        self.data_dir = data_dir + str(user)
         self.source = source
         self.data_cache = {}  # Cache loaded data by setting
         self.current_settings = np.ones(NUM_CHANNELS, dtype=np.int32)  # Default setting 1
         self.write_position = 0  # Current write position to chip
         self.read_position = 0  # Current read position in data
+        self.label_position = 0  # Current position in label array (one label per MAV window)
         self.brd = None
-        self.labels = np.array([], dtype=np.int32)
+        self.labels = np.array([], dtype=np.int32)  # Keep for internal tracking
         self.coefs = np.zeros((NUM_CLASSES, NUM_CHANNELS), dtype=np.float32)
-        self.pending_meta = True
+        self.intercept = np.zeros(NUM_CLASSES, dtype=np.float32)
+        self.means = np.zeros(NUM_CHANNELS, dtype=np.float32)
+        self.stds = np.ones(NUM_CHANNELS, dtype=np.float32)
+        self.pending_coefs = True  # Only need to send coefs/intercept once
 
         if self.source == 'static':
             # Preload all settings for the trial
             self._load_all_settings()
-            self._init_default_labels()
+            self._setup_dataset(user=user)
         elif self.source == 'chip':
-            self._setup_dataset()
+            self._setup_dataset(user=user)
             self._setup_chip()
         else:
             raise ValueError('source must be "static" or "chip"')
@@ -74,25 +80,33 @@ class DataStreamer:
         self.trial_lst = np.array(self.trial_lst)
         self.label_lst = np.array(self.label_lst)
 
-        acc_arr, weights_arr, settings_arr, coefs_arr = run_adaptive_model(
+        acc_arr, weights_arr, settings_arr, coefs_arr, intercept_arr, means_arr, stds_arr = run_adaptive_model(
             trials_data=self.trial_lst, 
             trials_labels=self.label_lst, 
             selected_idcs=np.ones(64).astype(bool), 
-            sim_settings=[3]*64, 
+            sim_settings=[0]*64, 
             trial=trial
         )
         print(f"Adaptive model run complete. Accuracy: {acc_arr[-1]:.4f}, Settings: {settings_arr[-1]}, Weights: {weights_arr[-1]}")
         self.selected_idcs = np.zeros(64, dtype=bool)
         self.selected_idcs[np.argsort(weights_arr[-1])[-NUM_CHANNELS:]] = True
-        self.coefs_arr = coefs_arr
         self.coefs = np.array(coefs_arr, dtype=np.float32) if coefs_arr is not None else np.zeros((0, 0), dtype=np.float32)
-        if len(self.label_lst) > self.trial:
-            self.labels = np.array(self.label_lst[self.trial], dtype=np.int32)
-        self.pending_meta = True
+        self.intercept = np.array(intercept_arr, dtype=np.float32) if intercept_arr is not None else np.zeros(NUM_CLASSES, dtype=np.float32)
+        self.means = np.array(means_arr, dtype=np.float32) if means_arr is not None else np.zeros(NUM_CHANNELS, dtype=np.float32)
+        self.stds = np.array(stds_arr, dtype=np.float32) if stds_arr is not None else np.ones(NUM_CHANNELS, dtype=np.float32)
+        self.pending_coefs = True
         
-        data_file = f"datasets/emg/user{user}.npy" # TODO: Get the path to the correct data file
+        data_file = f"datasets/emg/user{user}.npy"
         dataset = np.load(data_file)
         ntrials, nsplits, nch, npts = dataset.shape
+
+        self.labels = np.zeros(npts // MAV_WINDOW)
+        for i in range(11):
+            start = (30000 + i*11000 + 3500)
+            stop = (start + 4000)
+            start = start // 50
+            stop = stop // 50
+            self.labels[start:stop] = i
 
         dataset = dataset[trial]
         dataset = dataset.reshape(-1, npts)  # Shape (npts, NUM_CHANNELS)
@@ -109,7 +123,7 @@ class DataStreamer:
         self.dataset = curr_dataset
         
 
-    def _setup_chip(self, reprogram=True, src=22):
+    def _setup_chip(self, reprogram=True, src=21):
         brd = AURATestBoard(reprogram=reprogram)
         
         self.brd = brd
@@ -141,7 +155,7 @@ class DataStreamer:
         npackets = 100
         channel = 0
         setting = 3
-        lut_file = ''
+        lut_file = "/Users/dhruvvaish/Documents/Berkeley/Muller/AURA/aura_firmware/scripts/luts/calibrated/C002_sinewave_lut.txt"
         cal_int = False
 
 
@@ -172,6 +186,7 @@ class DataStreamer:
             filename = f"{self.data_dir}/adc_raw_{self.trial}_21_{setting}.npz"
             data = np.load(filename)
             for key in ['arr_0', 'arr_1', 'arr_2', 'arr_3']:
+                print(f"Setting {setting}, {key} shape: {data[key].shape}")
                 min_length = min(min_length, data[key].shape[1])
         
         print(f"Minimum length across all arrays: {min_length}")
@@ -189,17 +204,9 @@ class DataStreamer:
             ])
             self.data_cache[setting] = combined
             print(f"Loaded setting {setting}: shape {combined.shape}")
-        
+          # Print first 5 samples of each channel for verification
         self.data_length = min_length
         print(f"Total samples per channel: {self.data_length}")
-
-    def _init_default_labels(self):
-        """Initialize default labels if not provided by dataset."""
-        if self.labels.size == 0:
-            # 11 classes x 80 windows per class (matches build_dataset)
-            labels = np.array(sum([[i] * 80 for i in range(11)], []), dtype=np.int32)
-            self.labels = labels
-            self.pending_meta = True
 
     def _normalize_coefs(self, coefs):
         """Ensure coef matrix has shape (NUM_CLASSES, NUM_CHANNELS)."""
@@ -235,13 +242,16 @@ class DataStreamer:
             if num_read is not None:
                 if num_read > 0:
                     self.read_position += 1
+                    # Update label position (one label per MAV window)
                     data = process_bytearrs([readout])
                     data_proc = post_process_data(data, self.src)
-                    return data_proc, True
+                    self.label_position = (self.read_position * data_proc.shape[-1]) // MAV_WINDOW
+                    current_label = self._get_current_label()
+                    return data_proc, current_label, True
                 else:
-                    return None, False
+                    return None, None, False
             else:
-                return None, False
+                return None, None, False
 
         else:
             # Build output array selecting from appropriate setting per channel
@@ -250,28 +260,48 @@ class DataStreamer:
             # Handle wraparound
             end_pos = self.read_position + CHUNK_SIZE
             
-            for ch in range(NUM_CHANNELS):
+            channels = np.argwhere(self.selected_idcs).flatten()
+            for i, ch in enumerate(channels):
                 # Setting is 1-4, but data files are 0-3
-                setting = self.current_settings[ch] - 1
+                setting = self.current_settings[i] - 1
                 setting = max(0, min(3, setting))  # Clamp to valid range
                 
                 if end_pos <= self.data_length:
-                    chunk[ch] = self.data_cache[setting][ch, self.read_position:end_pos]
+                    chunk[i] = self.data_cache[setting][ch, self.read_position:end_pos]
                 else:
                     # Wrap around
                     first_part = self.data_length - self.read_position
-                    chunk[ch, :first_part] = self.data_cache[setting][ch, self.read_position:]
-                    chunk[ch, first_part:] = self.data_cache[setting][ch, :CHUNK_SIZE - first_part]
+                    chunk[i, :first_part] = self.data_cache[setting][ch, self.read_position:]
+                    chunk[i, first_part:] = self.data_cache[setting][ch, :CHUNK_SIZE - first_part]
             
             self.read_position = end_pos % self.data_length
-            return chunk, True
+            # Update label position (one label per MAV window)
+            self.label_position = self.read_position // MAV_WINDOW
+            current_label = self._get_current_label()
+            return chunk, current_label, True
+    
+    def _get_current_label(self):
+        """Get the current label based on label_position."""
+        if self.labels.size == 0:
+            return -1  # No label available
+        label_idx = int(self.label_position % len(self.labels))
+        return int(self.labels[label_idx])
     
     def update_settings(self, settings):
         """Update per-channel resolution settings."""
         self.current_settings = np.array(settings, dtype=np.int32)
         print(self.current_settings)
-        setup_adc_settings(self.brd, settings[SPLIT*NUM_CHANNELS:(SPLIT+1)*NUM_CHANNELS])  # Assuming all channels use the same setting for simplicity
-        acc_arr, weights_arr, settings_arr, coefs_arr = run_adaptive_model(
+        if self.source == 'chip':
+            self.brd.disable_spi_stream()
+            setup_adc_settings(self.brd, self.current_settings-1)  # Assuming all channels use the same setting for simplicity
+            # val = self.brd.read_register(29)
+            # print(f"Read back register 29: {val:016b}")
+            # val = self.brd.read_register(30)
+            # print(f"Read back register 30: {val:016b}")
+            self.brd._reset_fifo()
+            self.brd.enable_spi_stream(src=self.src, dac=True, readin=True,
+                          dac_count=1039)
+        acc_arr, weights_arr, settings_arr, coefs_arr, intercept_arr, means_arr, stds_arr = run_adaptive_model(
             trials_data=self.trial_lst,
             trials_labels=self.label_lst,
             selected_idcs=self.selected_idcs,
@@ -279,7 +309,10 @@ class DataStreamer:
             trial=self.trial
         )
         self.coefs = np.array(coefs_arr, dtype=np.float32) if coefs_arr is not None else np.zeros((0, 0), dtype=np.float32)
-        self.pending_meta = True
+        self.intercept = np.array(intercept_arr, dtype=np.float32) if intercept_arr is not None else np.zeros(NUM_CLASSES, dtype=np.float32)
+        self.means = np.array(means_arr, dtype=np.float32) if means_arr is not None else np.zeros(NUM_CHANNELS, dtype=np.float32)
+        self.stds = np.array(stds_arr, dtype=np.float32) if stds_arr is not None else np.ones(NUM_CHANNELS, dtype=np.float32)
+        self.pending_coefs = True
 
     def run_server(self):
         """Run the socket server."""
@@ -332,18 +365,20 @@ class DataStreamer:
             # Send data at target rate (30 Hz, each chunk is ~33ms of data)
             now = time.time()
             if now - last_send >= 1.0 / STREAM_RATE:
-                chunk, updated = self.get_chunk()
+                chunk, current_label, updated = self.get_chunk()
 
                 if updated:
-                    if self.pending_meta:
-                        self._send_labels(conn)
+                    if self.pending_coefs:
                         self._send_coefs(conn)
-                        self.pending_meta = False
+                        self._send_intercept(conn)
+                        self._send_means(conn)
+                        self._send_stds(conn)
+                        self.pending_coefs = False
 
-                    # Send header + data
+                    # Send header + data + current label
                     header = b'DATA'
                     data_bytes = chunk.astype(np.float32).tobytes()
-                    dims = struct.pack('<II', chunk.shape[0], chunk.shape[1])
+                    dims = struct.pack('<III', chunk.shape[0], chunk.shape[1], current_label)
 
                     try:
                         conn.sendall(header + dims + data_bytes)
@@ -356,17 +391,6 @@ class DataStreamer:
                     last_send = now
             
             time.sleep(0.005)  # Small sleep to prevent busy loop
-
-    def _send_labels(self, conn):
-        """Send labels packet to the client."""
-        labels = np.array(self.labels, dtype=np.int32).reshape(-1)
-        header = b'LABL'
-        meta = struct.pack('<I', labels.size)
-        payload = labels.tobytes()
-        try:
-            conn.sendall(header + meta + payload)
-        except BlockingIOError:
-            pass
 
     def _send_coefs(self, conn):
         """Send coef matrix packet to the client."""
@@ -381,6 +405,39 @@ class DataStreamer:
         except BlockingIOError:
             pass
 
+    def _send_intercept(self, conn):
+        """Send intercept vector packet to the client."""
+        intercept = np.array(self.intercept, dtype=np.float32).reshape(-1)
+        header = b'INTR'
+        meta = struct.pack('<I', intercept.size)
+        payload = intercept.tobytes()
+        try:
+            conn.sendall(header + meta + payload)
+        except BlockingIOError:
+            pass
+
+    def _send_means(self, conn):
+        """Send means vector packet to the client."""
+        means = np.array(self.means, dtype=np.float32).reshape(-1)
+        header = b'MEAN'
+        meta = struct.pack('<I', means.size)
+        payload = means.tobytes()
+        try:
+            conn.sendall(header + meta + payload)
+        except BlockingIOError:
+            pass
+
+    def _send_stds(self, conn):
+        """Send stds vector packet to the client."""
+        stds = np.array(self.stds, dtype=np.float32).reshape(-1)
+        header = b'STDS'
+        meta = struct.pack('<I', stds.size)
+        payload = stds.tobytes()
+        try:
+            conn.sendall(header + meta + payload)
+        except BlockingIOError:
+            pass
+
 
 def main():
     parser = argparse.ArgumentParser(description='Stream EMG data over socket')
@@ -390,9 +447,10 @@ def main():
                         help='Data source: static npz files or circular buffer file')
     parser.add_argument('--buffer-file', type=str, default=None,
                         help='Path to circular buffer file (required for source=buffer)')
+    parser.add_argument('--user', type=int, default=5, help='User number (1-5)')
     args = parser.parse_args()
 
-    streamer = DataStreamer(trial=args.trial, source=args.source, buffer_file=args.buffer_file)
+    streamer = DataStreamer(trial=args.trial, source=args.source, user=args.user)
     streamer.run_server()
 
 

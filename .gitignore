@@ -2,3 +2,8 @@ playback/
 __pycache__/
 Playback.zip
 datasets/
+*.bin
+debug.py
+*.png
+*.joblib
+*.npy

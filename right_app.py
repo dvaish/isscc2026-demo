@@ -17,6 +17,8 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QPalette, QColor
 import pyqtgraph as pg
+from scipy.special import softmax
+import os
 
 pg.setConfigOptions(antialias=True, background='w', foreground='k')
 
@@ -34,7 +36,7 @@ MAV_SAMPLES = DISPLAY_SAMPLES // MAV_WINDOW
 
 class SocketReceiver(QThread):
     """Background thread for receiving data from streamer and sending settings."""
-    data_received = pyqtSignal(object, object, object)
+    data_received = pyqtSignal(object, object, object, object, object, int)  # data, coefs, intercept, means, stds, current_label
     connected = pyqtSignal(bool)
     disconnected = pyqtSignal()
 
@@ -79,24 +81,36 @@ class SocketReceiver(QThread):
             try:
                 header = self._recv_exact(4)
                 if header == b'DATA':
-                    dims = self._recv_exact(8)
-                    n_channels, n_samples = struct.unpack('<II', dims)
+                    dims = self._recv_exact(12)
+                    n_channels, n_samples, current_label = struct.unpack('<III', dims)
                     data_bytes = self._recv_exact(n_channels * n_samples * 4)
                     data = np.frombuffer(data_bytes, dtype=np.float32)
                     data = data.reshape(n_channels, n_samples)
-                    self.data_received.emit(data, None, None)
-                elif header == b'LABL':
-                    size_data = self._recv_exact(4)
-                    length = struct.unpack('<I', size_data)[0]
-                    labels_bytes = self._recv_exact(length * 4) if length > 0 else b''
-                    labels = np.frombuffer(labels_bytes, dtype=np.int32) if length > 0 else np.array([], dtype=np.int32)
-                    self.data_received.emit(None, labels, None)
+                    self.data_received.emit(data, None, None, None, None, int(current_label))
                 elif header == b'COEF':
                     dims = self._recv_exact(8)
                     n_classes, n_channels = struct.unpack('<II', dims)
                     data_bytes = self._recv_exact(n_classes * n_channels * 4) if n_classes * n_channels > 0 else b''
                     coefs = np.frombuffer(data_bytes, dtype=np.float32).reshape(n_classes, n_channels) if n_classes * n_channels > 0 else np.zeros((0, 0), dtype=np.float32)
-                    self.data_received.emit(None, None, coefs)
+                    self.data_received.emit(None, coefs, None, None, None, -1)
+                elif header == b'INTR':
+                    size_data = self._recv_exact(4)
+                    length = struct.unpack('<I', size_data)[0]
+                    intercept_bytes = self._recv_exact(length * 4) if length > 0 else b''
+                    intercept = np.frombuffer(intercept_bytes, dtype=np.float32) if length > 0 else np.zeros(0, dtype=np.float32)
+                    self.data_received.emit(None, None, intercept, None, None, -1)
+                elif header == b'MEAN':
+                    size_data = self._recv_exact(4)
+                    length = struct.unpack('<I', size_data)[0]
+                    means_bytes = self._recv_exact(length * 4) if length > 0 else b''
+                    means = np.frombuffer(means_bytes, dtype=np.float32) if length > 0 else np.zeros(0, dtype=np.float32)
+                    self.data_received.emit(None, None, None, means, None, -1)
+                elif header == b'STDS':
+                    size_data = self._recv_exact(4)
+                    length = struct.unpack('<I', size_data)[0]
+                    stds_bytes = self._recv_exact(length * 4) if length > 0 else b''
+                    stds = np.frombuffer(stds_bytes, dtype=np.float32) if length > 0 else np.ones(0, dtype=np.float32)
+                    self.data_received.emit(None, None, None, None, stds, -1)
             except Exception as e:
                 raise e
 
@@ -228,8 +242,11 @@ class RightApp(QMainWindow):
         self.logits_buffer = np.zeros((NUM_CLASSES, MAV_SAMPLES))
         self.mav_accumulator = np.zeros((DISPLAY_CHANNELS,))
         self.mav_count = 0
-        self.labels = np.array([], dtype=np.int32)
         self.coefs = np.zeros((0, 0), dtype=np.float32)
+        self.intercept = np.zeros(0, dtype=np.float32)
+        self.means = np.zeros(0, dtype=np.float32)
+        self.stds = np.ones(0, dtype=np.float32)
+        self.current_label = -1  # Current ground truth label
 
         self.sliders = []
 
@@ -295,6 +312,26 @@ class RightApp(QMainWindow):
         """)
         self.reset_btn.clicked.connect(self._on_reset)
         btn_layout.addWidget(self.reset_btn)
+
+        self.all_max_btn = QPushButton("ALL MAX")
+        self.all_max_btn.setStyleSheet("""
+            QPushButton { background: #43A047; color: white; border: none;
+                padding: 10px 24px; border-radius: 4px; font-weight: bold; font-size: 12px; }
+            QPushButton:hover { background: #388E3C; }
+            QPushButton:pressed { background: #2E7D32; }
+        """)
+        self.all_max_btn.clicked.connect(self._on_all_max)
+        btn_layout.addWidget(self.all_max_btn)
+
+        self.all_min_btn = QPushButton("ALL MIN")
+        self.all_min_btn.setStyleSheet("""
+            QPushButton { background: #E53935; color: white; border: none;
+                padding: 10px 24px; border-radius: 4px; font-weight: bold; font-size: 12px; }
+            QPushButton:hover { background: #D32F2F; }
+            QPushButton:pressed { background: #C62828; }
+        """)
+        self.all_min_btn.clicked.connect(self._on_all_min)
+        btn_layout.addWidget(self.all_min_btn)
 
         self.status = QLabel("")
         self.status.setStyleSheet("color: #43A047; font-weight: bold;")
@@ -373,21 +410,38 @@ class RightApp(QMainWindow):
         self.logits_widget.setBackground('w')
         self.logits_plots = []
         self.logits_curves = []
+        self.logits_labels = []  # Store text labels for highlighting
+        logits_base_plot = None
 
         for i in range(NUM_CLASSES):
             p = self.logits_widget.addPlot(row=0, col=i)
             p.hideAxis('left')
             p.hideAxis('bottom')
-            p.setYRange(-1, 1)
+            if logits_base_plot is None:
+                p.setYRange(0, 1)
+                logits_base_plot = p
+            else:
+                p.setYLink(logits_base_plot)
             p.setXRange(0, 1)
             p.setMouseEnabled(x=False, y=False)
+            
+            # Add highlight rectangle (initially hidden)
+            from PyQt5.QtWidgets import QGraphicsRectItem
+            highlight = QGraphicsRectItem(0, -1, 1, 2)
+            highlight.setPen(pg.mkPen(None))
+            highlight.setBrush(pg.mkBrush(67, 160, 71, 80))  # Green with alpha
+            highlight.setVisible(False)
+            p.addItem(highlight)
+            
             label = pg.TextItem(f"C{i}", color='#888', anchor=(0, 0))
             label.setFont(QFont("Helvetica", 7))
             label.setPos(0.02, 0.9)
             p.addItem(label)
+            
             curve = p.plot(pen=pg.mkPen('#E53935', width=1))
             self.logits_plots.append(p)
             self.logits_curves.append(curve)
+            self.logits_labels.append((label, highlight))
 
         logits_layout.addWidget(self.logits_widget)
         main_layout.addWidget(logits_group, stretch=1)
@@ -410,6 +464,24 @@ class RightApp(QMainWindow):
         self.socket_receiver.send_settings(self.committed_settings)
         self._flash_status("✓ Reset")
 
+    def _on_all_max(self):
+        """Set all channels to maximum resolution (4)."""
+        self.resolution_settings[:] = 4
+        self.committed_settings = self.resolution_settings.copy()
+        for slider in self.sliders:
+            slider.setValue(4)
+        self.socket_receiver.send_settings(self.committed_settings)
+        self._flash_status("✓ All MAX")
+
+    def _on_all_min(self):
+        """Set all channels to minimum resolution (1)."""
+        self.resolution_settings[:] = 1
+        self.committed_settings = self.resolution_settings.copy()
+        for slider in self.sliders:
+            slider.setValue(1)
+        self.socket_receiver.send_settings(self.committed_settings)
+        self._flash_status("✓ All MIN")
+
     def _flash_status(self, msg):
         self.status.setText(msg)
         self.status.setStyleSheet("color: #43A047; font-weight: bold;")
@@ -417,13 +489,20 @@ class RightApp(QMainWindow):
 
     # ── Live data handlers ────────────────────────────────────────────────────
 
-    def _on_data_received(self, data, labels, coefs):
-        if labels is not None:
-            self.labels = labels
+    def _on_data_received(self, data, coefs, intercept, means, stds, current_label):
         if coefs is not None:
             self.coefs = coefs
+        if intercept is not None:
+            self.intercept = intercept
+        if means is not None:
+            self.means = means
+        if stds is not None:
+            self.stds = stds
+        if current_label >= 0:
+            self.current_label = current_label
         if data is None:
             return
+        
         num_new = data.shape[1]
 
         # Roll voltage buffer and insert new samples
@@ -459,6 +538,18 @@ class RightApp(QMainWindow):
 
         for i in range(NUM_CLASSES):
             self.logits_curves[i].setData(t_mav, self.logits_buffer[i])
+            
+        # Highlight the current ground truth label box
+        for i in range(NUM_CLASSES):
+            label_text, highlight_rect = self.logits_labels[i]
+            if i == self.current_label:
+                # Highlight this box in green
+                highlight_rect.setVisible(True)
+                label_text.setColor('#2E7D32')  # Dark green
+            else:
+                # Normal appearance
+                highlight_rect.setVisible(False)
+                label_text.setColor('#888')  # Gray
 
     def _compute_logits(self, mav_value):
         if self.coefs is None or self.coefs.size == 0:
@@ -467,7 +558,17 @@ class RightApp(QMainWindow):
             return np.zeros((NUM_CLASSES,), dtype=np.float32)
         n_classes, n_channels = self.coefs.shape
         if n_channels == mav_value.shape[0]:
-            logits = self.coefs @ mav_value
+            mav_value = np.roll(mav_value, 1)  # TODO: IDK why the channels are off by one in the order
+            with open("debug_mav.bin", "ab") as f:
+                f.write(mav_value.astype(np.float32).tobytes()) 
+            mav_value = (mav_value - self.means) / self.stds  # Center MAV values
+            logits_unnormalized = self.coefs @ mav_value + self.intercept
+            logits = softmax(logits_unnormalized)  # For numerical stability
+            with open("debug_logits.bin", "ab") as f:
+                f.write(logits_unnormalized.astype(np.float32).tobytes())
+            classes = np.argmax(logits, keepdims=True)
+            logits = np.zeros((NUM_CLASSES,), dtype=np.float32)
+            logits[classes] = 1.0  # One-hot for predicted class
         elif n_channels > mav_value.shape[0]:
             logits = self.coefs[:, :mav_value.shape[0]] @ mav_value
         else:
@@ -507,6 +608,17 @@ def main():
     palette.setColor(QPalette.Base, QColor(255, 255, 255))
     palette.setColor(QPalette.AlternateBase, QColor(245, 245, 245))
     app.setPalette(palette)
+
+
+    if os.path.exists("debug_mav.bin"):
+        os.remove("debug_mav.bin")
+    with open("debug_mav.bin", "w") as f:
+        pass
+
+    if os.path.exists("debug_logits.bin"):
+        os.remove("debug_logits.bin")
+    with open("debug_logits.bin", "w") as f:
+        pass
 
     window = RightApp()
     window.show()
